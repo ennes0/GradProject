@@ -19,7 +19,6 @@ import * as Location from 'expo-location';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import RouteSelectionModal from '../../components/ui/RouteSelectionModal';
-import RouteDetailsModal from '../../components/ui/RouteDetailsModal';
 import NavigationView from '../../components/ui/NavigationView';
 import { useMapPreload } from '../../components/context/MapPreloadContext';
 import Svg, { Path, Circle, Ellipse } from 'react-native-svg';
@@ -136,7 +135,6 @@ export default function MapScreen() {
   const [startPoint, setStartPoint] = useState(initialLocation);
   const [endPoint, setEndPoint] = useState(null);
   const [showRouteSelection, setShowRouteSelection] = useState(false);
-  const [showRouteDetails, setShowRouteDetails] = useState(false);
   const [selectedRoute, setSelectedRoute] = useState(null);
   const [isNavigating, setIsNavigating] = useState(false);
   const [startAddress, setStartAddress] = useState('');
@@ -234,16 +232,15 @@ export default function MapScreen() {
     setSelectedRoute({
       ...route,
       coordinates: generateRouteCoordinates(startPoint, endPoint),
-      difficulty: route.label === 'Easiest' ? 'Easy' : 
-                  route.label === 'Balanced' ? 'Medium' : 'Hard',
-      maxSlope: route.label === 'Easiest' ? '5%' : 
-                route.label === 'Balanced' ? '12%' : '18%',
-      estimatedEffort: route.label === 'Easiest' ? 'Low' : 
-                       route.label === 'Balanced' ? 'High' : 'Very High',
-      distance: '2.5 km',
+      difficulty: route.type === 'easiest' ? 'Easy' : 
+                  route.type === 'balanced' ? 'Medium' : 'Hard',
+      maxSlope: route.avgSlope || (route.type === 'easiest' ? '%2' : 
+                route.type === 'balanced' ? '%5' : '%12'),
+      estimatedEffort: route.type === 'easiest' ? 'Low' : 
+                       route.type === 'balanced' ? 'Medium' : 'High',
     });
-    // Route Details modal'ını aç
-    setTimeout(() => setShowRouteDetails(true), 300);
+    // Doğrudan navigasyonu başlat
+    setIsNavigating(true);
   };
 
   const handleStartNavigation = (route) => {
@@ -610,13 +607,8 @@ export default function MapScreen() {
         visible={showRouteSelection}
         onClose={() => setShowRouteSelection(false)}
         onSelectRoute={handleRouteSelect}
-      />
-
-      <RouteDetailsModal
-        visible={showRouteDetails}
-        onClose={() => setShowRouteDetails(false)}
-        route={selectedRoute}
-        onStartNavigation={handleStartNavigation}
+        startLocation={startAddress || 'Konumunuz'}
+        endLocation={endAddress || 'Hedef'}
       />
 
       <NavigationView

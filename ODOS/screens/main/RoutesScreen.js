@@ -13,6 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Colors } from '../../constants/Colors';
+import RouteDetailsModal from '../../components/ui/RouteDetailsModal';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_WIDTH = SCREEN_WIDTH - 40;
@@ -172,6 +173,8 @@ const getDifficultyConfig = (difficulty) => {
 export default function RoutesScreen() {
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [favorites, setFavorites] = useState(['1', '3']);
+  const [selectedRoute, setSelectedRoute] = useState(null);
+  const [showRouteDetails, setShowRouteDetails] = useState(false);
 
   const toggleFavorite = (routeId) => {
     setFavorites(prev => 
@@ -220,7 +223,14 @@ export default function RoutesScreen() {
     const isFav = favorites.includes(route.id);
 
     return (
-      <TouchableOpacity style={styles.routeCard} activeOpacity={0.9}>
+      <TouchableOpacity 
+        style={styles.routeCard} 
+        activeOpacity={0.9}
+        onPress={() => {
+          setSelectedRoute(route);
+          setShowRouteDetails(true);
+        }}
+      >
         {/* Kart Görseli */}
         <View style={styles.cardImageContainer}>
           <Image 
@@ -466,6 +476,16 @@ export default function RoutesScreen() {
         {/* Alt boşluk */}
         <View style={{ height: 100 }} />
       </ScrollView>
+
+      {/* Route Details Modal */}
+      <RouteDetailsModal
+        visible={showRouteDetails}
+        onClose={() => {
+          setShowRouteDetails(false);
+          setSelectedRoute(null);
+        }}
+        route={selectedRoute}
+      />
     </SafeAreaView>
   );
 }

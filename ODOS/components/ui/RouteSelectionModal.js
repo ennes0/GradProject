@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef, useEffect } from 'react';
 import {
   View,
   StyleSheet,
@@ -7,323 +7,522 @@ import {
   Modal,
   Dimensions,
   ScrollView,
+  Animated,
+  PanResponder,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import Svg, { Path, Defs, LinearGradient, Stop, Circle, Line, Text as SvgText } from 'react-native-svg';
+import { Colors } from '../../constants/Colors';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-export default function RouteSelectionModal({ visible, onClose, onSelectRoute, routes }) {
+export default function RouteSelectionModal({ visible, onClose, onSelectRoute, routes, startLocation, endLocation }) {
+  const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const dragY = useRef(new Animated.Value(0)).current;
+  const isClosingRef = useRef(false);
+
+  // Pan Responder for drag to dismiss
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        return gestureState.dy > 5;
+      },
+      onPanResponderMove: (_, gestureState) => {
+        if (gestureState.dy > 0) {
+          dragY.setValue(gestureState.dy);
+        }
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        if (gestureState.dy > 100 || gestureState.vy > 0.5) {
+          handleClose();
+        } else {
+          Animated.spring(dragY, {
+            toValue: 0,
+            useNativeDriver: true,
+            tension: 100,
+            friction: 10,
+          }).start();
+        }
+      },
+    })
+  ).current;
+
+  useEffect(() => {
+    if (visible) {
+      isClosingRef.current = false;
+      slideAnim.setValue(SCREEN_HEIGHT);
+      fadeAnim.setValue(0);
+      dragY.setValue(0);
+      
+      Animated.parallel([
+        Animated.spring(slideAnim, {
+          toValue: 0,
+          useNativeDriver: true,
+          tension: 65,
+          friction: 11,
+        }),
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+  }, [visible]);
+
+  const handleClose = (selectedRoute = null) => {
+    if (isClosingRef.current) return;
+    isClosingRef.current = true;
+    
+    Animated.parallel([
+      Animated.timing(slideAnim, {
+        toValue: SCREEN_HEIGHT,
+        duration: 250,
+        useNativeDriver: true,
+      }),
+      Animated.timing(fadeAnim, {
+        toValue: 0,
+        duration: 200,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      dragY.setValue(0);
+      onClose();
+      // Rota seçildiyse, modal kapandıktan sonra navigation'ı başlat
+      if (selectedRoute && onSelectRoute) {
+        setTimeout(() => {
+          onSelectRoute(selectedRoute);
+        }, 50);
+      }
+    });
+  };
+
   const defaultRoutes = [
     {
       id: 1,
       type: 'easiest',
-      label: 'Easiest',
+      label: 'En Kolay',
+      description: 'Düz yollar, minimum yokuş. Yeni başlayanlar için ideal.',
       totalClimb: '15m',
-      duration: '22 min',
+      distance: '2.8 km',
+      duration: '22 dk',
+      calories: '145 kcal',
+      avgSlope: '%2',
       color: '#4CAF50',
+      icon: 'leaf',
       elevationData: [2, 3, 4, 5, 7, 9, 10, 12, 14, 15],
     },
     {
       id: 2,
       type: 'balanced',
-      label: 'Balanced',
+      label: 'Dengeli',
+      description: 'Süre ve zorluk dengesi. Günlük yürüyüşler için önerilir.',
       totalClimb: '45m',
-      duration: '18 min',
-      color: '#4ECDC4',
+      distance: '2.4 km',
+      duration: '18 dk',
+      calories: '185 kcal',
+      avgSlope: '%5',
+      color: Colors.primary,
+      icon: 'fitness',
       elevationData: [2, 5, 10, 15, 20, 28, 35, 40, 43, 45],
+      recommended: true,
     },
     {
       id: 3,
       type: 'fastest',
-      label: 'Fastest',
+      label: 'En Hızlı',
+      description: 'Kısa mesafe, yüksek eğim. Deneyimli yürüyüşçüler için.',
       totalClimb: '86m',
-      duration: '15 min',
-      color: '#F44336',
+      distance: '1.9 km',
+      duration: '15 dk',
+      calories: '220 kcal',
+      avgSlope: '%12',
+      color: '#FF6B6B',
+      icon: 'flash',
       elevationData: [2, 10, 25, 40, 55, 65, 72, 78, 82, 86],
     },
   ];
 
   const routeData = routes || defaultRoutes;
 
-  const renderElevationChart = (data, color) => {
+  const renderElevationChart = (data, color, routeId) => {
+    const chartWidth = SCREEN_WIDTH - 100;
+    const chartHeight = 50;
+    const padding = 4;
+    
     const maxValue = Math.max(...data);
+    const minValue = Math.min(...data);
+    const range = maxValue - minValue || 1;
+    
+    // Create smooth bezier curve path
+    const points = data.map((value, index) => {
+      const x = padding + (index / (data.length - 1)) * (chartWidth - padding * 2);
+      const y = chartHeight - padding - ((value - minValue) / range) * (chartHeight - padding * 2);
+      return { x, y, value };
+    });
+    
+    // Generate smooth curve using bezier
+    let pathD = `M ${points[0].x} ${points[0].y}`;
+    for (let i = 1; i < points.length; i++) {
+      const prev = points[i - 1];
+      const curr = points[i];
+      const cpx = (prev.x + curr.x) / 2;
+      pathD += ` Q ${cpx} ${prev.y} ${cpx} ${(prev.y + curr.y) / 2}`;
+      pathD += ` Q ${cpx} ${curr.y} ${curr.x} ${curr.y}`;
+    }
+    
+    // Area path (closed)
+    const areaPath = pathD + ` L ${points[points.length - 1].x} ${chartHeight} L ${points[0].x} ${chartHeight} Z`;
+    
+    // Find highest point for marker
+    const highestPoint = points.reduce((max, p) => p.y < max.y ? p : max, points[0]);
+    
     return (
-      <View style={styles.chartContainer}>
-        {data.map((value, index) => {
-          const height = (value / maxValue) * 40;
-          return (
-            <View
-              key={index}
-              style={[
-                styles.chartBar,
-                { height, backgroundColor: color, opacity: 0.8 },
-              ]}
-            />
-          );
-        })}
+      <View style={styles.chartWrapper}>
+        <Svg width={chartWidth} height={chartHeight + 16}>
+          <Defs>
+            <LinearGradient id={`gradient-${routeId}`} x1="0%" y1="0%" x2="0%" y2="100%">
+              <Stop offset="0%" stopColor={color} stopOpacity="0.4" />
+              <Stop offset="100%" stopColor={color} stopOpacity="0.05" />
+            </LinearGradient>
+          </Defs>
+          
+          {/* Grid lines */}
+          <Line x1={padding} y1={chartHeight * 0.25} x2={chartWidth - padding} y2={chartHeight * 0.25} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
+          <Line x1={padding} y1={chartHeight * 0.5} x2={chartWidth - padding} y2={chartHeight * 0.5} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
+          <Line x1={padding} y1={chartHeight * 0.75} x2={chartWidth - padding} y2={chartHeight * 0.75} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
+          
+          {/* Area fill */}
+          <Path d={areaPath} fill={`url(#gradient-${routeId})`} />
+          
+          {/* Line */}
+          <Path d={pathD} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+          
+          {/* Start and end dots */}
+          <Circle cx={points[0].x} cy={points[0].y} r="3" fill="#FFF" stroke={color} strokeWidth="2" />
+          <Circle cx={points[points.length - 1].x} cy={points[points.length - 1].y} r="3" fill="#FFF" stroke={color} strokeWidth="2" />
+          
+          {/* Highest point marker */}
+          <Circle cx={highestPoint.x} cy={highestPoint.y} r="4" fill={color} />
+          <SvgText x={highestPoint.x} y={highestPoint.y - 8} fontSize="9" fontWeight="600" fill={color} textAnchor="middle">
+            {highestPoint.value}m
+          </SvgText>
+          
+          {/* Labels */}
+          <SvgText x={padding} y={chartHeight + 12} fontSize="9" fill="#AAA" textAnchor="start">0</SvgText>
+          <SvgText x={chartWidth - padding} y={chartHeight + 12} fontSize="9" fill="#AAA" textAnchor="end">{maxValue}m</SvgText>
+        </Svg>
       </View>
     );
   };
 
+  if (!visible) return null;
+
   return (
     <Modal
       visible={visible}
-      animationType="slide"
+      animationType="none"
       transparent={true}
-      onRequestClose={onClose}
+      onRequestClose={handleClose}
     >
-      <View style={styles.modalOverlay}>
-        <View style={styles.modalContent}>
-          <SafeAreaView edges={['top']}>
-            <View style={styles.header}>
-              <TouchableOpacity onPress={onClose} style={styles.backButton}>
-                <Ionicons name="close" size={28} color="#333" />
-              </TouchableOpacity>
-            </View>
-          </SafeAreaView>
-
-          {/* Mini Harita Preview */}
-          <View style={styles.mapPreview}>
-            <View style={styles.mapPlaceholder}>
-              <View style={styles.routeLinePreview} />
-              <View style={styles.markerStart}>
-                <Text style={styles.markerLabel}>A</Text>
-              </View>
-              <View style={styles.markerEnd}>
-                <Text style={styles.markerLabel}>B</Text>
-              </View>
-            </View>
-          </View>
-
-          {/* Rota Seçenekleri */}
-          <ScrollView style={styles.routesContainer} showsVerticalScrollIndicator={false}>
-            {routeData.map((route) => (
-              <TouchableOpacity
-                key={route.id}
-                style={styles.routeCard}
-                onPress={() => {
-                  onSelectRoute(route);
-                  onClose();
-                }}
-                activeOpacity={0.7}
-              >
-                <View style={[styles.routeHeader, { borderLeftColor: route.color, borderLeftWidth: 4 }]}>
-                  <View style={styles.routeLabelContainer}>
-                    <Text style={[styles.routeLabel, { color: route.color }]}>
-                      {route.label}
-                    </Text>
-                    <View style={styles.routeMetrics}>
-                      <View style={styles.metric}>
-                        <Ionicons name="trending-up" size={16} color="#666" />
-                        <Text style={styles.metricText}>{route.totalClimb}</Text>
-                      </View>
-                      <View style={styles.metricDivider} />
-                      <View style={styles.metric}>
-                        <Ionicons name="time-outline" size={16} color="#666" />
-                        <Text style={styles.metricText}>{route.duration}</Text>
-                      </View>
-                    </View>
-                  </View>
-                  <View style={[styles.routeBadge, { backgroundColor: route.color + '15' }]}>
-                    <Ionicons name="checkmark-circle" size={24} color={route.color} />
-                  </View>
-                </View>
-                
-                <View style={styles.elevationSection}>
-                  <Text style={styles.elevationLabel}>Elevation Profile</Text>
-                  {renderElevationChart(route.elevationData, route.color)}
-                </View>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
+      <Animated.View style={[styles.overlay, { opacity: fadeAnim }]}>
+        <TouchableOpacity style={styles.overlayTouch} onPress={handleClose} activeOpacity={1} />
+      </Animated.View>
+      
+      <Animated.View 
+        style={[
+          styles.modalContent,
+          { 
+            transform: [{ 
+              translateY: Animated.add(slideAnim, dragY) 
+            }] 
+          }
+        ]}
+      >
+        {/* Handle Bar */}
+        <View {...panResponder.panHandlers} style={styles.handleContainer}>
+          <View style={styles.handle} />
         </View>
-      </View>
+
+        {/* Header */}
+        <View style={styles.header}>
+          <View style={styles.headerContent}>
+            <Text style={styles.headerTitle}>Rota Seçin</Text>
+            <Text style={styles.headerSubtitle}>
+              {startLocation || 'Başlangıç'} → {endLocation || 'Varış'}
+            </Text>
+          </View>
+          <TouchableOpacity onPress={handleClose} style={styles.closeButton}>
+            <Ionicons name="close" size={22} color="#666" />
+          </TouchableOpacity>
+        </View>
+
+        {/* Route Options */}
+        <ScrollView 
+          style={styles.routesContainer} 
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.routesContent}
+        >
+          {routeData.map((route) => (
+            <TouchableOpacity
+              key={route.id}
+              style={[
+                styles.routeCard,
+                route.recommended && styles.recommendedCard
+              ]}
+              onPress={() => handleClose(route)}
+              activeOpacity={0.7}
+            >
+              {route.recommended && (
+                <View style={styles.recommendedBadge}>
+                  <Ionicons name="star" size={12} color="#FFF" />
+                  <Text style={styles.recommendedText}>Önerilen</Text>
+                </View>
+              )}
+              
+              <View style={styles.routeHeader}>
+                <View style={[styles.routeIconBg, { backgroundColor: route.color + '15' }]}>
+                  <Ionicons name={route.icon} size={22} color={route.color} />
+                </View>
+                <View style={styles.routeInfo}>
+                  <Text style={[styles.routeLabel, { color: route.color }]}>
+                    {route.label}
+                  </Text>
+                  <Text style={styles.routeDescription} numberOfLines={2}>
+                    {route.description}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Stats Row */}
+              <View style={styles.statsRow}>
+                <View style={styles.statItem}>
+                  <Ionicons name="navigate-outline" size={16} color="#888" />
+                  <Text style={styles.statValue}>{route.distance}</Text>
+                </View>
+                <View style={styles.statItem}>
+                  <Ionicons name="time-outline" size={16} color="#888" />
+                  <Text style={styles.statValue}>{route.duration}</Text>
+                </View>
+                <View style={styles.statItem}>
+                  <Ionicons name="trending-up-outline" size={16} color="#888" />
+                  <Text style={styles.statValue}>{route.totalClimb}</Text>
+                </View>
+                <View style={styles.statItem}>
+                  <Ionicons name="flame-outline" size={16} color="#888" />
+                  <Text style={styles.statValue}>{route.calories}</Text>
+                </View>
+              </View>
+              
+              {/* Elevation Chart */}
+              <View style={styles.elevationSection}>
+                <View style={styles.elevationHeader}>
+                  <Text style={styles.elevationLabel}>Yükselti Profili</Text>
+                  <Text style={styles.slopeText}>Ort. Eğim: {route.avgSlope}</Text>
+                </View>
+                {renderElevationChart(route.elevationData, route.color, route.id)}
+              </View>
+
+              {/* Select Button */}
+              <View style={[styles.selectButton, { backgroundColor: route.color }]}>
+                <Ionicons name="arrow-forward" size={18} color="#FFF" />
+                <Text style={styles.selectButtonText}>Bu Rotayı Seç</Text>
+              </View>
+            </TouchableOpacity>
+          ))}
+          
+          <View style={{ height: 40 }} />
+        </ScrollView>
+      </Animated.View>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  modalOverlay: {
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  },
+  overlayTouch: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.4)',
-    justifyContent: 'flex-end',
   },
   modalContent: {
-    backgroundColor: '#F5F5F5',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    height: SCREEN_HEIGHT * 0.92,
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: '#F8F9FA',
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    maxHeight: SCREEN_HEIGHT * 0.85,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 10,
-    elevation: 10,
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 20,
+    elevation: 25,
+  },
+  handleContainer: {
+    alignItems: 'center',
+    paddingTop: 12,
+    paddingBottom: 8,
+    backgroundColor: '#FFF',
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+  },
+  handle: {
+    width: 44,
+    height: 5,
+    backgroundColor: '#DDDDDD',
+    borderRadius: 3,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 8,
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F0F0F0',
+    backgroundColor: '#FFF',
   },
-  backButton: {
-    padding: 8,
-    backgroundColor: 'rgba(0, 0, 0, 0.05)',
-    borderRadius: 20,
+  headerContent: {
+    flex: 1,
   },
   headerTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#333',
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1A1A2E',
+    marginBottom: 4,
   },
-  mapPreview: {
-    height: 160,
-    backgroundColor: '#E8E4D9',
-    position: 'relative',
+  headerSubtitle: {
+    fontSize: 13,
+    color: '#888',
   },
-  mapPlaceholder: {
-    flex: 1,
+  closeButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#F5F5F5',
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  routeLinePreview: {
-    position: 'absolute',
-    width: '50%',
-    height: 60,
-    borderWidth: 3,
-    borderColor: '#4ECDC4',
-    borderRadius: 12,
-    transform: [{ rotate: '10deg' }],
-    opacity: 0.8,
-  },
-  markerStart: {
-    position: 'absolute',
-    top: 45,
-    left: '28%',
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#4ECDC4',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#FFF',
-  },
-  markerEnd: {
-    position: 'absolute',
-    bottom: 50,
-    right: '25%',
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#F44336',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#FFF',
-  },
-  markerLabel: {
-    color: '#FFF',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  locateButton: {
-    position: 'absolute',
-    bottom: 16,
-    right: 16,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#FFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 4,
   },
   routesContainer: {
     flex: 1,
+  },
+  routesContent: {
     padding: 16,
   },
   routeCard: {
     backgroundColor: '#FFF',
-    borderRadius: 20,
-    padding: 20,
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.12,
-    shadowRadius: 12,
-    elevation: 6,
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 14,
+  },
+  recommendedCard: {
+    borderWidth: 2,
+    borderColor: Colors.primary,
+  },
+  recommendedBadge: {
+    position: 'absolute',
+    top: -1,
+    right: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.primary,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderBottomLeftRadius: 8,
+    borderBottomRightRadius: 8,
+    gap: 4,
+  },
+  recommendedText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#FFF',
   },
   routeHeader: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 16,
-    paddingLeft: 12,
+    alignItems: 'flex-start',
+    marginBottom: 14,
   },
-  routeLabelContainer: {
+  routeIconBg: {
+    width: 46,
+    height: 46,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  routeInfo: {
     flex: 1,
   },
   routeLabel: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    marginBottom: 8,
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 4,
   },
-  routeMetrics: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  metric: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  metricText: {
-    fontSize: 14,
+  routeDescription: {
+    fontSize: 13,
     color: '#666',
-    fontWeight: '500',
+    lineHeight: 18,
   },
-  metricDivider: {
-    width: 1,
-    height: 14,
-    backgroundColor: '#DDD',
-    marginHorizontal: 12,
+  statsRow: {
+    flexDirection: 'row',
+    backgroundColor: '#F8F9FA',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 14,
   },
-  routeBadge: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+  statItem: {
+    flex: 1,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 4,
+  },
+  statValue: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#1A1A2E',
   },
   elevationSection: {
-    marginTop: 8,
+    marginBottom: 14,
+  },
+  elevationHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
   },
   elevationLabel: {
     fontSize: 12,
-    color: '#999',
-    marginBottom: 8,
+    color: '#888',
     fontWeight: '500',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
   },
-  chartContainer: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    height: 60,
-    gap: 4,
-    backgroundColor: '#F9F9F9',
+  slopeText: {
+    fontSize: 12,
+    color: '#888',
+    fontWeight: '500',
+  },
+  chartWrapper: {
+    backgroundColor: '#FAFAFA',
     borderRadius: 12,
     padding: 8,
+    alignItems: 'center',
   },
-  chartBar: {
-    flex: 1,
-    borderRadius: 3,
-    minHeight: 6,
+  selectButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    borderRadius: 12,
+    gap: 8,
+  },
+  selectButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#FFF',
   },
 });
