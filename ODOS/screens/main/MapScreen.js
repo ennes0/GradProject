@@ -139,6 +139,39 @@ export default function MapScreen() {
   const [isNavigating, setIsNavigating] = useState(false);
   const [startAddress, setStartAddress] = useState('');
   const [endAddress, setEndAddress] = useState('');
+  const [routeCoordinates, setRouteCoordinates] = useState([]);
+  const [isLoadingRoute, setIsLoadingRoute] = useState(false);
+  
+  // Arama state'leri
+  const [activeSearchField, setActiveSearchField] = useState(null); // 'start' veya 'end'
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const searchAnim = useRef(new Animated.Value(0)).current;
+  
+  // Mock lokasyon verileri - İstanbul
+  const mockLocations = [
+    { id: 1, name: 'Taksim Meydanı', address: 'Beyoğlu, İstanbul', latitude: 41.0370, longitude: 28.9850, icon: 'location' },
+    { id: 2, name: 'Galata Kulesi', address: 'Beyoğlu, İstanbul', latitude: 41.0256, longitude: 28.9741, icon: 'business' },
+    { id: 3, name: 'Kadıköy İskele', address: 'Kadıköy, İstanbul', latitude: 40.9910, longitude: 29.0235, icon: 'boat' },
+    { id: 4, name: 'Beşiktaş Meydanı', address: 'Beşiktaş, İstanbul', latitude: 41.0422, longitude: 29.0067, icon: 'location' },
+    { id: 5, name: 'Eminönü', address: 'Fatih, İstanbul', latitude: 41.0177, longitude: 28.9712, icon: 'storefront' },
+    { id: 6, name: 'Sultanahmet Camii', address: 'Fatih, İstanbul', latitude: 41.0054, longitude: 28.9768, icon: 'business' },
+    { id: 7, name: 'Dolmabahçe Sarayı', address: 'Beşiktaş, İstanbul', latitude: 41.0391, longitude: 29.0005, icon: 'business' },
+    { id: 8, name: 'İstanbul Havalimanı', address: 'Arnavutköy, İstanbul', latitude: 41.2753, longitude: 28.7519, icon: 'airplane' },
+    { id: 9, name: 'Sabiha Gökçen Havalimanı', address: 'Pendik, İstanbul', latitude: 40.8986, longitude: 29.3092, icon: 'airplane' },
+    { id: 10, name: 'Levent Metro', address: 'Beşiktaş, İstanbul', latitude: 41.0794, longitude: 29.0117, icon: 'subway' },
+    { id: 11, name: 'Nişantaşı', address: 'Şişli, İstanbul', latitude: 41.0480, longitude: 28.9945, icon: 'cart' },
+    { id: 12, name: 'Bağdat Caddesi', address: 'Kadıköy, İstanbul', latitude: 40.9631, longitude: 29.0642, icon: 'walk' },
+    { id: 13, name: 'Maçka Parkı', address: 'Şişli, İstanbul', latitude: 41.0455, longitude: 28.9940, icon: 'leaf' },
+    { id: 14, name: 'Bebek Sahili', address: 'Beşiktaş, İstanbul', latitude: 41.0768, longitude: 29.0435, icon: 'water' },
+    { id: 15, name: 'Ortaköy Meydanı', address: 'Beşiktaş, İstanbul', latitude: 41.0477, longitude: 29.0266, icon: 'cafe' },
+  ];
+  
+  // Son aramalar (mock)
+  const recentSearches = [
+    { id: 'r1', name: 'Ev', address: 'Şişli, İstanbul', latitude: 41.0600, longitude: 28.9870, icon: 'home' },
+    { id: 'r2', name: 'İş', address: 'Levent, İstanbul', latitude: 41.0794, longitude: 29.0117, icon: 'briefcase' },
+  ];
   
   // Harita özelleştirme state'leri
   const [mapType, setMapType] = useState('standard');
@@ -209,29 +242,178 @@ export default function MapScreen() {
     Alert.alert('Arama', 'Hedef seçme özelliği eklenecek');
   };
 
-  const handleMapPress = (e) => {
+  // Arama fonksiyonu
+  const handleSearch = (text, field) => {
+    if (field === 'start') {
+      setStartAddress(text);
+    } else {
+      setEndAddress(text);
+    }
+    
+    if (text.length > 0) {
+      setIsSearching(true);
+      // Mock arama - gerçek uygulamada API kullanılır
+      const filtered = mockLocations.filter(loc => 
+        loc.name.toLowerCase().includes(text.toLowerCase()) ||
+        loc.address.toLowerCase().includes(text.toLowerCase())
+      );
+      setSearchResults(filtered.slice(0, 5));
+      
+      // Animasyonu başlat
+      Animated.spring(searchAnim, {
+        toValue: 1,
+        useNativeDriver: true,
+        tension: 100,
+        friction: 10,
+      }).start();
+    } else {
+      setSearchResults([]);
+      Animated.timing(searchAnim, {
+        toValue: 0,
+        duration: 200,
+        useNativeDriver: true,
+      }).start();
+    }
+  };
+
+  // Benim Konumum seçildiğinde
+  const handleSelectMyLocation = async () => {
+    if (!location) {
+      Alert.alert('Konum Bulunamadı', 'Lütfen konum izni verin ve tekrar deneyin.');
+      return;
+    }
+    
+    const coordinate = { latitude: location.latitude, longitude: location.longitude };
+    
+    if (activeSearchField === 'start') {
+      setStartAddress('Benim Konumum');
+      setStartPoint(coordinate);
+    } else {
+      setEndAddress('Benim Konumum');
+      setEndPoint(coordinate);
+      
+      // Eğer başlangıç noktası varsa rotayı hesapla
+      if (startPoint) {
+        await fetchRouteFromAPI(startPoint, coordinate);
+        if (mapRef.current) {
+          mapRef.current.fitToCoordinates(
+            [startPoint, coordinate],
+            { edgePadding: { top: 150, right: 50, bottom: 300, left: 50 }, animated: true }
+          );
+        }
+        setTimeout(() => setShowRouteSelection(true), 500);
+      }
+    }
+    
+    // Aramayı kapat
+    setSearchResults([]);
+    setActiveSearchField(null);
+    Animated.timing(searchAnim, {
+      toValue: 0,
+      duration: 200,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  // Lokasyon seçildiğinde
+  const handleSelectLocation = async (location) => {
+    const coordinate = { latitude: location.latitude, longitude: location.longitude };
+    
+    if (activeSearchField === 'start') {
+      setStartAddress(location.name);
+      setStartPoint(coordinate);
+    } else {
+      setEndAddress(location.name);
+      setEndPoint(coordinate);
+      
+      // Eğer başlangıç noktası varsa rotayı hesapla
+      if (startPoint) {
+        await fetchRouteFromAPI(startPoint, coordinate);
+        if (mapRef.current) {
+          mapRef.current.fitToCoordinates(
+            [startPoint, coordinate],
+            { edgePadding: { top: 150, right: 50, bottom: 300, left: 50 }, animated: true }
+          );
+        }
+        setTimeout(() => setShowRouteSelection(true), 500);
+      }
+    }
+    
+    // Aramayı kapat
+    setSearchResults([]);
+    setActiveSearchField(null);
+    Animated.timing(searchAnim, {
+      toValue: 0,
+      duration: 200,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  // Arama alanına focus olduğunda
+  const handleSearchFocus = (field) => {
+    setActiveSearchField(field);
+    // Son aramaları göster
+    if (field === 'start' && !startAddress) {
+      setSearchResults(recentSearches);
+    } else if (field === 'end' && !endAddress) {
+      setSearchResults(recentSearches);
+    }
+    
+    Animated.spring(searchAnim, {
+      toValue: 1,
+      useNativeDriver: true,
+      tension: 100,
+      friction: 10,
+    }).start();
+  };
+
+  // Aramayı kapat
+  const closeSearch = () => {
+    setActiveSearchField(null);
+    setSearchResults([]);
+    Animated.timing(searchAnim, {
+      toValue: 0,
+      duration: 200,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const handleMapPress = async (e) => {
     if (isNavigating) return; // Navigasyon sırasında disable
     
     const coordinate = e.nativeEvent.coordinate;
     
     if (!startPoint) {
       setStartPoint(coordinate);
+      setRouteCoordinates([]);
     } else if (!endPoint) {
       setEndPoint(coordinate);
-      // Route Selection modal'ını aç
-      setTimeout(() => setShowRouteSelection(true), 300);
+      // Rota çiz ve modal'ı aç
+      await fetchRouteFromAPI(startPoint, coordinate);
+      // Haritayı rotaya fit et
+      if (mapRef.current) {
+        mapRef.current.fitToCoordinates(
+          [startPoint, coordinate],
+          {
+            edgePadding: { top: 100, right: 50, bottom: 300, left: 50 },
+            animated: true,
+          }
+        );
+      }
+      setTimeout(() => setShowRouteSelection(true), 500);
     } else {
       // Reset
       setStartPoint(coordinate);
       setEndPoint(null);
       setSelectedRoute(null);
+      setRouteCoordinates([]);
     }
   };
 
   const handleRouteSelect = (route) => {
     setSelectedRoute({
       ...route,
-      coordinates: generateRouteCoordinates(startPoint, endPoint),
+      coordinates: routeCoordinates,
       difficulty: route.type === 'easiest' ? 'Easy' : 
                   route.type === 'balanced' ? 'Medium' : 'Hard',
       maxSlope: route.avgSlope || (route.type === 'easiest' ? '%2' : 
@@ -251,18 +433,125 @@ export default function MapScreen() {
     setIsNavigating(false);
   };
 
-  const generateRouteCoordinates = (start, end) => {
+  // Google Directions API ile gerçek yol rotası al
+  const fetchRouteFromAPI = async (start, end) => {
     if (!start || !end) return [];
     
-    // Basit bir rota oluştur (gerçek uygulamada API'den gelecek)
-    const steps = 20;
+    setIsLoadingRoute(true);
+    
+    try {
+      // Google Directions API - Yürüyüş modu
+      const GOOGLE_MAPS_API_KEY = 'YOUR_GOOGLE_MAPS_API_KEY'; // API anahtarınızı buraya ekleyin
+      
+      const origin = `${start.latitude},${start.longitude}`;
+      const destination = `${end.latitude},${end.longitude}`;
+      
+      const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${destination}&mode=walking&key=${GOOGLE_MAPS_API_KEY}`;
+      
+      const response = await fetch(url);
+      const data = await response.json();
+      
+      if (data.status === 'OK' && data.routes.length > 0) {
+        // Polyline decode et
+        const points = data.routes[0].overview_polyline.points;
+        const decodedCoords = decodePolyline(points);
+        setRouteCoordinates(decodedCoords);
+        return decodedCoords;
+      } else {
+        // API başarısız olursa fallback olarak düz çizgi kullan
+        console.log('Directions API failed, using fallback');
+        const fallbackCoords = generateFallbackRoute(start, end);
+        setRouteCoordinates(fallbackCoords);
+        return fallbackCoords;
+      }
+    } catch (error) {
+      console.error('Route fetch error:', error);
+      // Hata durumunda fallback
+      const fallbackCoords = generateFallbackRoute(start, end);
+      setRouteCoordinates(fallbackCoords);
+      return fallbackCoords;
+    } finally {
+      setIsLoadingRoute(false);
+    }
+  };
+
+  // Google Polyline decode fonksiyonu
+  const decodePolyline = (encoded) => {
+    const points = [];
+    let index = 0;
+    let lat = 0;
+    let lng = 0;
+
+    while (index < encoded.length) {
+      let shift = 0;
+      let result = 0;
+      let byte;
+
+      do {
+        byte = encoded.charCodeAt(index++) - 63;
+        result |= (byte & 0x1f) << shift;
+        shift += 5;
+      } while (byte >= 0x20);
+
+      const dlat = (result & 1) ? ~(result >> 1) : (result >> 1);
+      lat += dlat;
+
+      shift = 0;
+      result = 0;
+
+      do {
+        byte = encoded.charCodeAt(index++) - 63;
+        result |= (byte & 0x1f) << shift;
+        shift += 5;
+      } while (byte >= 0x20);
+
+      const dlng = (result & 1) ? ~(result >> 1) : (result >> 1);
+      lng += dlng;
+
+      points.push({
+        latitude: lat / 1e5,
+        longitude: lng / 1e5,
+      });
+    }
+
+    return points;
+  };
+
+  // Fallback: Daha gerçekçi görünen kıvrımlı rota
+  const generateFallbackRoute = (start, end) => {
+    if (!start || !end) return [];
+    
     const coordinates = [];
+    const steps = 30;
+    
+    // Ana yön hesapla
+    const latDiff = end.latitude - start.latitude;
+    const lngDiff = end.longitude - start.longitude;
     
     for (let i = 0; i <= steps; i++) {
       const ratio = i / steps;
+      
+      // Sokak benzeri kıvrımlar ekle
+      let latOffset = 0;
+      let lngOffset = 0;
+      
+      // Her 5-7 adımda bir "dönüş" simüle et
+      if (i > 0 && i < steps) {
+        const segment = Math.floor(i / 6);
+        const isHorizontalSegment = segment % 2 === 0;
+        
+        if (isHorizontalSegment) {
+          // Yatay hareket - sadece longitude değiştir
+          latOffset = Math.sin(ratio * Math.PI) * 0.0008 * (segment % 3 - 1);
+        } else {
+          // Dikey hareket - sadece latitude değiştir  
+          lngOffset = Math.cos(ratio * Math.PI) * 0.0008 * (segment % 3 - 1);
+        }
+      }
+      
       coordinates.push({
-        latitude: start.latitude + (end.latitude - start.latitude) * ratio,
-        longitude: start.longitude + (end.longitude - start.longitude) * ratio,
+        latitude: start.latitude + latDiff * ratio + latOffset,
+        longitude: start.longitude + lngDiff * ratio + lngOffset,
       });
     }
     
@@ -371,39 +660,257 @@ export default function MapScreen() {
               </Marker>
             )}
 
+            {/* Rota çizgisi - iki nokta seçildiğinde göster */}
+            {routeCoordinates.length > 0 && !selectedRoute && (
+              <>
+                {/* Soft gölge */}
+                <Polyline
+                  coordinates={routeCoordinates}
+                  strokeColor="rgba(0, 0, 0, 0.08)"
+                  strokeWidth={8}
+                  lineCap="round"
+                  lineJoin="round"
+                />
+                {/* Ana siyah çizgi - ince ve zarif */}
+                <Polyline
+                  coordinates={routeCoordinates}
+                  strokeColor="#1A1A2E"
+                  strokeWidth={4}
+                  lineCap="round"
+                  lineJoin="round"
+                />
+                {/* Üst parlak efekt */}
+                <Polyline
+                  coordinates={routeCoordinates}
+                  strokeColor="rgba(255, 255, 255, 0.3)"
+                  strokeWidth={1.5}
+                  lineCap="round"
+                  lineJoin="round"
+                />
+              </>
+            )}
+
+            {/* Seçili rota - navigasyon için */}
             {selectedRoute && selectedRoute.coordinates && (
-              <Polyline
-                coordinates={selectedRoute.coordinates}
-                strokeColor={selectedRoute.color}
-                strokeWidth={5}
-              />
+              <>
+                {/* Gölge */}
+                <Polyline
+                  coordinates={selectedRoute.coordinates}
+                  strokeColor="rgba(0, 0, 0, 0.1)"
+                  strokeWidth={8}
+                  lineCap="round"
+                  lineJoin="round"
+                />
+                {/* Ana çizgi */}
+                <Polyline
+                  coordinates={selectedRoute.coordinates}
+                  strokeColor="#1A1A2E"
+                  strokeWidth={4}
+                  lineCap="round"
+                  lineJoin="round"
+                />
+                {/* Yön göstergesi - kesikli iç çizgi */}
+                <Polyline
+                  coordinates={selectedRoute.coordinates}
+                  strokeColor={selectedRoute.color || '#4ECDC4'}
+                  strokeWidth={2}
+                  lineCap="round"
+                  lineJoin="round"
+                  lineDashPattern={[1, 12]}
+                />
+              </>
             )}
           </MapView>
 
+          {/* Loading indicator for route */}
+          {isLoadingRoute && (
+            <View style={styles.loadingOverlay}>
+              <View style={styles.loadingBox}>
+                <Text style={styles.loadingText}>Rota hesaplanıyor...</Text>
+              </View>
+            </View>
+          )}
+
           <SafeAreaView style={styles.searchContainerSafe} edges={['top']}>
-            <View style={styles.searchCard}>
+            {/* Modern Arama Kartı */}
+            <View style={[styles.searchCard, activeSearchField && styles.searchCardExpanded]}>
+              {/* Başlangıç Noktası */}
               <View style={styles.searchRow}>
-                <Ionicons name="ellipse" size={12} color="#4ECDC4" style={styles.searchIcon} />
+                <View style={styles.searchIconWrapper}>
+                  <View style={[styles.searchDot, styles.searchDotStart]} />
+                </View>
                 <TextInput
                   style={styles.searchInput}
                   placeholder="Nereden?"
-                  placeholderTextColor="#999"
+                  placeholderTextColor="#AAA"
                   value={startAddress}
-                  onChangeText={setStartAddress}
+                  onChangeText={(text) => handleSearch(text, 'start')}
+                  onFocus={() => handleSearchFocus('start')}
                 />
+                {startAddress.length > 0 && (
+                  <TouchableOpacity 
+                    style={styles.clearButton}
+                    onPress={() => {
+                      setStartAddress('');
+                      setStartPoint(null);
+                      setRouteCoordinates([]);
+                    }}
+                  >
+                    <Ionicons name="close-circle" size={18} color="#CCC" />
+                  </TouchableOpacity>
+                )}
               </View>
-              <View style={styles.divider} />
+              
+              {/* Bağlantı Çizgisi */}
+              <View style={styles.connectionLine}>
+                <View style={styles.dashedLine} />
+              </View>
+              
+              {/* Bitiş Noktası */}
               <View style={styles.searchRow}>
-                <Ionicons name="location-sharp" size={16} color="#F44336" style={styles.searchIcon} />
+                <View style={styles.searchIconWrapper}>
+                  <View style={[styles.searchDot, styles.searchDotEnd]} />
+                </View>
                 <TextInput
                   style={styles.searchInput}
-                  placeholder="Nereye?"
-                  placeholderTextColor="#999"
+                  placeholder="Nereye gitmek istiyorsun?"
+                  placeholderTextColor="#AAA"
                   value={endAddress}
-                  onChangeText={setEndAddress}
+                  onChangeText={(text) => handleSearch(text, 'end')}
+                  onFocus={() => handleSearchFocus('end')}
                 />
+                {endAddress.length > 0 && (
+                  <TouchableOpacity 
+                    style={styles.clearButton}
+                    onPress={() => {
+                      setEndAddress('');
+                      setEndPoint(null);
+                      setRouteCoordinates([]);
+                      setSelectedRoute(null);
+                    }}
+                  >
+                    <Ionicons name="close-circle" size={18} color="#CCC" />
+                  </TouchableOpacity>
+                )}
               </View>
+              
+              {/* Swap Butonu */}
+              <TouchableOpacity 
+                style={styles.swapButton}
+                onPress={() => {
+                  const tempAddress = startAddress;
+                  const tempPoint = startPoint;
+                  setStartAddress(endAddress);
+                  setStartPoint(endPoint);
+                  setEndAddress(tempAddress);
+                  setEndPoint(tempPoint);
+                }}
+              >
+                <Ionicons name="swap-vertical" size={18} color="#666" />
+              </TouchableOpacity>
             </View>
+            
+            {/* Arama Sonuçları */}
+            {activeSearchField && (
+              <Animated.View 
+                style={[
+                  styles.searchResultsContainer,
+                  {
+                    opacity: searchAnim,
+                    transform: [{
+                      translateY: searchAnim.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [-10, 0],
+                      })
+                    }]
+                  }
+                ]}
+              >
+                {/* Benim Konumum Seçeneği */}
+                <TouchableOpacity 
+                  style={styles.myLocationOption}
+                  onPress={handleSelectMyLocation}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.myLocationIcon}>
+                    <Ionicons name="navigate" size={20} color="#FFF" />
+                  </View>
+                  <View style={styles.myLocationContent}>
+                    <Text style={styles.myLocationTitle}>Benim Konumum</Text>
+                    <Text style={styles.myLocationSubtitle}>Mevcut konumunu kullan</Text>
+                  </View>
+                  <View style={styles.myLocationBadge}>
+                    <Ionicons name="locate" size={14} color="#4ECDC4" />
+                  </View>
+                </TouchableOpacity>
+                
+                {/* Ayırıcı */}
+                <View style={styles.searchDivider} />
+                
+                {/* Başlık */}
+                {searchResults.length > 0 && !startAddress && !endAddress && (
+                  <View style={styles.searchResultsHeader}>
+                    <Ionicons name="time-outline" size={16} color="#999" />
+                    <Text style={styles.searchResultsTitle}>Son Aramalar</Text>
+                  </View>
+                )}
+                
+                {searchResults.length > 0 && (startAddress || endAddress) && (
+                  <View style={styles.searchResultsHeader}>
+                    <Ionicons name="search-outline" size={16} color="#999" />
+                    <Text style={styles.searchResultsTitle}>Önerilen Yerler</Text>
+                  </View>
+                )}
+                
+                {/* Sonuç Listesi */}
+                {searchResults.length > 0 && (
+                  <ScrollView 
+                    style={styles.searchResultsList}
+                    keyboardShouldPersistTaps="handled"
+                    showsVerticalScrollIndicator={false}
+                  >
+                    {searchResults.map((item, index) => (
+                      <TouchableOpacity 
+                        key={item.id}
+                        style={[
+                          styles.searchResultItem,
+                          index === searchResults.length - 1 && styles.searchResultItemLast
+                        ]}
+                        onPress={() => handleSelectLocation(item)}
+                        activeOpacity={0.7}
+                      >
+                        <View style={styles.searchResultIcon}>
+                          <Ionicons name={item.icon || 'location'} size={18} color="#4ECDC4" />
+                        </View>
+                        <View style={styles.searchResultContent}>
+                          <Text style={styles.searchResultName}>{item.name}</Text>
+                          <Text style={styles.searchResultAddress}>{item.address}</Text>
+                        </View>
+                        <Ionicons name="arrow-forward" size={16} color="#DDD" />
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+                )}
+                
+                {/* Haritadan Seç Butonu */}
+                <TouchableOpacity 
+                  style={styles.selectFromMapButton}
+                  onPress={closeSearch}
+                >
+                  <Ionicons name="map-outline" size={18} color="#4ECDC4" />
+                  <Text style={styles.selectFromMapText}>Haritadan seç</Text>
+                </TouchableOpacity>
+              </Animated.View>
+            )}
+            
+            {/* Arka Plan Overlay */}
+            {activeSearchField && (
+              <TouchableOpacity 
+                style={styles.searchOverlay}
+                activeOpacity={1}
+                onPress={closeSearch}
+              />
+            )}
           </SafeAreaView>
 
           {/* Katman Menüsü */}
@@ -615,6 +1122,9 @@ export default function MapScreen() {
         visible={isNavigating}
         route={selectedRoute}
         onClose={handleCloseNavigation}
+        userLocation={location}
+        startPoint={startPoint}
+        endPoint={endPoint}
       />
     </View>
   );
@@ -632,36 +1142,224 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    zIndex: 1,
+    zIndex: 10,
     paddingHorizontal: 16,
   },
   searchCard: {
     backgroundColor: 'white',
-    borderRadius: 12,
+    borderRadius: 16,
     marginTop: 8,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
     elevation: 8,
+    position: 'relative',
+  },
+  searchCardExpanded: {
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    elevation: 12,
   },
   searchRow: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 14,
   },
-  searchIcon: {
+  searchIconWrapper: {
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
     marginRight: 12,
+  },
+  searchDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+  searchDotStart: {
+    backgroundColor: '#4ECDC4',
+    borderWidth: 2,
+    borderColor: '#3DB9B1',
+  },
+  searchDotEnd: {
+    backgroundColor: '#FF6B6B',
+    borderWidth: 2,
+    borderColor: '#E85555',
+  },
+  connectionLine: {
+    position: 'absolute',
+    left: 27,
+    top: 38,
+    bottom: 38,
+    width: 2,
+    alignItems: 'center',
+  },
+  dashedLine: {
+    flex: 1,
+    width: 2,
+    backgroundColor: '#E8E8E8',
+    borderRadius: 1,
   },
   searchInput: {
     flex: 1,
     fontSize: 16,
-    color: '#333',
+    color: '#1A1A2E',
+    fontWeight: '500',
+  },
+  clearButton: {
+    padding: 4,
+  },
+  swapButton: {
+    position: 'absolute',
+    right: 12,
+    top: '50%',
+    marginTop: -16,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F5F5F5',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  searchOverlay: {
+    position: 'absolute',
+    top: 200,
+    left: -16,
+    right: -16,
+    bottom: -1000,
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+    zIndex: -1,
+  },
+  searchResultsContainer: {
+    backgroundColor: 'white',
+    borderRadius: 16,
+    marginTop: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    elevation: 8,
+    maxHeight: 350,
+    overflow: 'hidden',
+  },
+  searchResultsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 8,
+    gap: 8,
+  },
+  searchResultsTitle: {
+    fontSize: 13,
+    color: '#999',
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  searchResultsList: {
+    maxHeight: 250,
+  },
+  searchResultItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F5F5F5',
+  },
+  searchResultItemLast: {
+    borderBottomWidth: 0,
+  },
+  searchResultIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#F0FAF9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  searchResultContent: {
+    flex: 1,
+  },
+  searchResultName: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#1A1A2E',
+    marginBottom: 2,
+  },
+  searchResultAddress: {
+    fontSize: 13,
+    color: '#888',
+  },
+  // Benim Konumum Seçeneği
+  myLocationOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  myLocationIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#4ECDC4',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+    shadowColor: '#4ECDC4',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  myLocationContent: {
+    flex: 1,
+  },
+  myLocationTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1A1A2E',
+    marginBottom: 2,
+  },
+  myLocationSubtitle: {
+    fontSize: 13,
+    color: '#888',
+  },
+  myLocationBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F0FAF9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  searchDivider: {
+    height: 1,
+    backgroundColor: '#F0F0F0',
+    marginHorizontal: 16,
+  },
+  selectFromMapButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#F0F0F0',
+    gap: 8,
+  },
+  selectFromMapText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#4ECDC4',
   },
   divider: {
     height: 1,
-    backgroundColor: '#E0E0E0',
+    backgroundColor: '#F0F0F0',
     marginHorizontal: 16,
   },
   mapControls: {
@@ -842,5 +1540,32 @@ const styles = StyleSheet.create({
     backgroundColor: '#4ECDC410',
     borderWidth: 2,
     borderColor: '#4ECDC4',
+  },
+  // Loading Overlay
+  loadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingBox: {
+    backgroundColor: '#FFF',
+    paddingHorizontal: 24,
+    paddingVertical: 16,
+    borderRadius: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  loadingText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#333',
   },
 });
