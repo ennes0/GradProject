@@ -75,7 +75,7 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
   const handleClose = (selectedRoute = null) => {
     if (isClosingRef.current) return;
     isClosingRef.current = true;
-    
+    const routeToSelect = selectedRoute && typeof selectedRoute === 'object' && selectedRoute.id != null ? selectedRoute : null;
     Animated.parallel([
       Animated.timing(slideAnim, {
         toValue: SCREEN_HEIGHT,
@@ -90,11 +90,8 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
     ]).start(() => {
       dragY.setValue(0);
       onClose();
-      // Rota seçildiyse, modal kapandıktan sonra navigation'ı başlat
-      if (selectedRoute && onSelectRoute) {
-        setTimeout(() => {
-          onSelectRoute(selectedRoute);
-        }, 50);
+      if (routeToSelect && onSelectRoute) {
+        setTimeout(() => onSelectRoute(routeToSelect), 50);
       }
     });
   };
@@ -102,23 +99,23 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
   const defaultRoutes = [
     {
       id: 1,
-      type: 'easiest',
-      label: 'En Kolay',
-      description: 'Düz yollar, minimum yokuş. Yeni başlayanlar için ideal.',
-      totalClimb: '15m',
-      distance: '2.8 km',
-      duration: '22 dk',
-      calories: '145 kcal',
-      avgSlope: '%2',
-      color: '#4CAF50',
-      icon: 'leaf',
-      elevationData: [2, 3, 4, 5, 7, 9, 10, 12, 14, 15],
+      type: 'fastest',
+      label: 'En Hızlı',
+      description: 'Tobler ile tahmini en kısa süre.',
+      totalClimb: '86m',
+      distance: '1.9 km',
+      duration: '15 dk',
+      calories: '220 kcal',
+      avgSlope: '%12',
+      color: '#FF6B6B',
+      icon: 'flash',
+      elevationData: [2, 10, 25, 40, 55, 65, 72, 78, 82, 86],
     },
     {
       id: 2,
       type: 'balanced',
       label: 'Dengeli',
-      description: 'Süre ve zorluk dengesi. Günlük yürüyüşler için önerilir.',
+      description: 'Süre ve yokuş dengesi. Günlük yürüyüş için uygun.',
       totalClimb: '45m',
       distance: '2.4 km',
       duration: '18 dk',
@@ -131,39 +128,44 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
     },
     {
       id: 3,
-      type: 'fastest',
-      label: 'En Hızlı',
-      description: 'Kısa mesafe, yüksek eğim. Deneyimli yürüyüşçüler için.',
-      totalClimb: '86m',
-      distance: '1.9 km',
-      duration: '15 dk',
-      calories: '220 kcal',
-      avgSlope: '%12',
-      color: '#FF6B6B',
-      icon: 'flash',
-      elevationData: [2, 10, 25, 40, 55, 65, 72, 78, 82, 86],
+      type: 'easiest',
+      label: 'En Kolay',
+      description: 'Eğim değişimi az, olabildiğince düz rota.',
+      totalClimb: '15m',
+      distance: '2.8 km',
+      duration: '22 dk',
+      calories: '145 kcal',
+      avgSlope: '%2',
+      color: '#4CAF50',
+      icon: 'leaf',
+      elevationData: [2, 3, 4, 5, 7, 9, 10, 12, 14, 15],
     },
   ];
 
-  const routeData = routes || defaultRoutes;
+  const routeData = (routes && Array.isArray(routes) && routes.length > 0) ? routes : defaultRoutes;
 
   const renderElevationChart = (data, color, routeId) => {
+    const safeData = (data && Array.isArray(data) && data.length >= 2) ? data : [0, 10];
     const chartWidth = SCREEN_WIDTH - 100;
     const chartHeight = 50;
     const padding = 4;
+    const leftLabelWidth = 32;
+    const graphLeft = leftLabelWidth + padding;
+    const graphWidth = chartWidth - graphLeft - padding;
     
-    const maxValue = Math.max(...data);
-    const minValue = Math.min(...data);
+    const maxValue = Math.max(...safeData);
+    const minValue = Math.min(...safeData);
     const range = maxValue - minValue || 1;
     
-    // Create smooth bezier curve path
-    const points = data.map((value, index) => {
-      const x = padding + (index / (data.length - 1)) * (chartWidth - padding * 2);
-      const y = chartHeight - padding - ((value - minValue) / range) * (chartHeight - padding * 2);
+    const valueToY = (value) =>
+      chartHeight - padding - ((value - minValue) / range) * (chartHeight - padding * 2);
+    
+    const points = safeData.map((value, index) => {
+      const x = graphLeft + (index / (safeData.length - 1 || 1)) * graphWidth;
+      const y = valueToY(value);
       return { x, y, value };
     });
     
-    // Generate smooth curve using bezier
     let pathD = `M ${points[0].x} ${points[0].y}`;
     for (let i = 1; i < points.length; i++) {
       const prev = points[i - 1];
@@ -173,11 +175,15 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
       pathD += ` Q ${cpx} ${curr.y} ${curr.x} ${curr.y}`;
     }
     
-    // Area path (closed)
     const areaPath = pathD + ` L ${points[points.length - 1].x} ${chartHeight} L ${points[0].x} ${chartHeight} Z`;
-    
-    // Find highest point for marker
     const highestPoint = points.reduce((max, p) => p.y < max.y ? p : max, points[0]);
+    
+    const yLabels = [];
+    const steps = 4;
+    for (let i = 0; i <= steps; i++) {
+      const val = minValue + (range * i) / steps;
+      yLabels.push({ value: Math.round(val), y: valueToY(val) });
+    }
     
     return (
       <View style={styles.chartWrapper}>
@@ -190,29 +196,30 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
           </Defs>
           
           {/* Grid lines */}
-          <Line x1={padding} y1={chartHeight * 0.25} x2={chartWidth - padding} y2={chartHeight * 0.25} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
-          <Line x1={padding} y1={chartHeight * 0.5} x2={chartWidth - padding} y2={chartHeight * 0.5} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
-          <Line x1={padding} y1={chartHeight * 0.75} x2={chartWidth - padding} y2={chartHeight * 0.75} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
+          <Line x1={graphLeft} y1={chartHeight * 0.25} x2={chartWidth - padding} y2={chartHeight * 0.25} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
+          <Line x1={graphLeft} y1={chartHeight * 0.5} x2={chartWidth - padding} y2={chartHeight * 0.5} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
+          <Line x1={graphLeft} y1={chartHeight * 0.75} x2={chartWidth - padding} y2={chartHeight * 0.75} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
           
-          {/* Area fill */}
           <Path d={areaPath} fill={`url(#gradient-${routeId})`} />
-          
-          {/* Line */}
           <Path d={pathD} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
           
-          {/* Start and end dots */}
           <Circle cx={points[0].x} cy={points[0].y} r="3" fill="#FFF" stroke={color} strokeWidth="2" />
           <Circle cx={points[points.length - 1].x} cy={points[points.length - 1].y} r="3" fill="#FFF" stroke={color} strokeWidth="2" />
-          
-          {/* Highest point marker */}
           <Circle cx={highestPoint.x} cy={highestPoint.y} r="4" fill={color} />
           <SvgText x={highestPoint.x} y={highestPoint.y - 8} fontSize="9" fontWeight="600" fill={color} textAnchor="middle">
             {highestPoint.value}m
           </SvgText>
           
-          {/* Labels */}
-          <SvgText x={padding} y={chartHeight + 12} fontSize="9" fill="#AAA" textAnchor="start">0</SvgText>
-          <SvgText x={chartWidth - padding} y={chartHeight + 12} fontSize="9" fill="#AAA" textAnchor="end">{maxValue}m</SvgText>
+          {/* Y ekseni: yükselti değerleri (m) */}
+          {yLabels.map(({ value, y }, i) => (
+            <SvgText key={`y-${i}-${value}`} x={leftLabelWidth - 4} y={y + 3} fontSize="9" fill="#888" textAnchor="end">
+              {value}m
+            </SvgText>
+          ))}
+          
+          {/* X ekseni: sadece başlangıç/bitiş (sayı yok) */}
+          <SvgText x={graphLeft} y={chartHeight + 12} fontSize="9" fill="#AAA" textAnchor="start">Başlangıç</SvgText>
+          <SvgText x={chartWidth - padding} y={chartHeight + 12} fontSize="9" fill="#AAA" textAnchor="end">Bitiş</SvgText>
         </Svg>
       </View>
     );
@@ -322,7 +329,7 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
                   <Text style={styles.elevationLabel}>Yükselti Profili</Text>
                   <Text style={styles.slopeText}>Ort. Eğim: {route.avgSlope}</Text>
                 </View>
-                {renderElevationChart(route.elevationData, route.color, route.id)}
+                {renderElevationChart(route.elevationData ?? [0, 10], route.color, route.id)}
               </View>
 
               {/* Select Button */}

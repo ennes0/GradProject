@@ -21,6 +21,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import RouteSelectionModal from '../../components/ui/RouteSelectionModal';
 import NavigationView from '../../components/ui/NavigationView';
 import { useMapPreload } from '../../components/context/MapPreloadContext';
+import { getRouteUrl, getRoutesUrl } from '../../config/api';
 import Svg, { Path, Circle, Ellipse } from 'react-native-svg';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -141,6 +142,8 @@ export default function MapScreen() {
   const [endAddress, setEndAddress] = useState('');
   const [routeCoordinates, setRouteCoordinates] = useState([]);
   const [isLoadingRoute, setIsLoadingRoute] = useState(false);
+  const [routeStatsFromApi, setRouteStatsFromApi] = useState(null); // ODOS API'den gelen rotalar (modal + harita)
+  const [selectedRouteIndex, setSelectedRouteIndex] = useState(0);   // Haritada hangi rota vurgulu (0, 1, 2)
   
   // Arama state'leri
   const [activeSearchField, setActiveSearchField] = useState(null); // 'start' veya 'end'
@@ -380,17 +383,19 @@ export default function MapScreen() {
 
   const handleMapPress = async (e) => {
     if (isNavigating) return; // Navigasyon sırasında disable
-    
+
+    // Rota çiziliyken harita tıklaması yeni nokta/reset yapmasın; sadece rota iptal edildikten sonra yeni rota seçilebilsin
+    const hasRouteDrawn = (routeStatsFromApi && routeStatsFromApi.length > 0) || (endPoint && routeCoordinates.length > 0);
+    if (hasRouteDrawn) return;
+
     const coordinate = e.nativeEvent.coordinate;
-    
+
     if (!startPoint) {
       setStartPoint(coordinate);
       setRouteCoordinates([]);
     } else if (!endPoint) {
       setEndPoint(coordinate);
-      // Rota çiz ve modal'ı aç
       await fetchRouteFromAPI(startPoint, coordinate);
-      // Haritayı rotaya fit et
       if (mapRef.current) {
         mapRef.current.fitToCoordinates(
           [startPoint, coordinate],
@@ -402,26 +407,42 @@ export default function MapScreen() {
       }
       setTimeout(() => setShowRouteSelection(true), 500);
     } else {
-      // Reset
       setStartPoint(coordinate);
       setEndPoint(null);
       setSelectedRoute(null);
       setRouteCoordinates([]);
+      setRouteStatsFromApi(null);
+      setSelectedRouteIndex(0);
     }
   };
 
+  /** Rota seçimini iptal et; ardından haritaya tıklayarak yeni hedef seçilebilir */
+  const handleCancelRoute = () => {
+    setEndPoint(null);
+    setEndAddress('');
+    setSelectedRoute(null);
+    setRouteCoordinates([]);
+    setRouteStatsFromApi(null);
+    setSelectedRouteIndex(0);
+    setShowRouteSelection(false);
+  };
+
   const handleRouteSelect = (route) => {
+    if (!route || typeof route !== 'object' || route.nativeEvent != null) return;
+    if (route.id == null && route.label == null) return;
+    if (route.coordinates && route.coordinates.length > 0) {
+      setRouteCoordinates(route.coordinates);
+    }
+    const idx = routeStatsFromApi?.findIndex((r) => r.id === route.id || (r.type === route.type && r.label === route.label));
+    if (typeof idx === 'number' && idx >= 0) setSelectedRouteIndex(idx);
     setSelectedRoute({
       ...route,
-      coordinates: routeCoordinates,
-      difficulty: route.type === 'easiest' ? 'Easy' : 
-                  route.type === 'balanced' ? 'Medium' : 'Hard',
-      maxSlope: route.avgSlope || (route.type === 'easiest' ? '%2' : 
-                route.type === 'balanced' ? '%5' : '%12'),
-      estimatedEffort: route.type === 'easiest' ? 'Low' : 
-                       route.type === 'balanced' ? 'Medium' : 'High',
+      coordinates: route.coordinates || routeCoordinates,
+      difficulty: route.type === 'easiest' ? 'easy' : route.type === 'fastest' ? 'hard' : 'medium',
+      maxSlope: route.avgSlope || (route.type === 'easiest' ? '%2' : route.type === 'fastest' ? '%12' : '%5'),
+      estimatedEffort: route.type === 'easiest' ? 'Low' : route.type === 'fastest' ? 'High' : 'Medium',
     });
-    // Doğrudan navigasyonu başlat
+    setShowRouteSelection(false);
     setIsNavigating(true);
   };
 
@@ -433,40 +454,107 @@ export default function MapScreen() {
     setIsNavigating(false);
   };
 
-  // Google Directions API ile gerçek yol rotası al
+  /** İki rotanın koordinat dizisi aynı/çok benzer mi kontrol eder */
+  const routesAreSame = (a, b) => {
+    if (!a?.coordinates?.length || !b?.coordinates?.length) return false;
+    if (a.coordinates.length !== b.coordinates.length) return false;
+    const eps = 1e-5;
+    for (let i = 0; i < a.coordinates.length; i++) {
+      const p = a.coordinates[i];
+      const q = b.coordinates[i];
+      const latA = typeof p.latitude === 'number' ? p.latitude : p[0];
+      const lonA = typeof p.longitude === 'number' ? p.longitude : p[1];
+      const latB = typeof q.latitude === 'number' ? q.latitude : q[0];
+      const lonB = typeof q.longitude === 'number' ? q.longitude : q[1];
+      if (Math.abs(latA - latB) > eps || Math.abs(lonA - lonB) > eps) return false;
+    }
+    return true;
+  };
+
+  /** Aynı gelen rota seçeneklerini tekilleştirir; kullanıcıya sadece farklı rotalar gösterilir */
+  const deduplicateRoutesByPath = (cards) => {
+    const out = [];
+    for (const card of cards) {
+      if (!out.some((existing) => routesAreSame(existing, card))) out.push(card);
+    }
+    return out.map((r, i) => ({ ...r, id: i + 1 }));
+  };
+
+  // ODOS backend API: 3 rota önerisi (En Kısa, En Hızlı, En Kolay)
   const fetchRouteFromAPI = async (start, end) => {
     if (!start || !end) return [];
-    
+
     setIsLoadingRoute(true);
-    
+    setRouteStatsFromApi(null);
+
+    const url = getRoutesUrl(start.latitude, start.longitude, end.latitude, end.longitude);
+    console.log('[ODOS API] Request (3 routes):', url);
+
     try {
-      // Google Directions API - Yürüyüş modu
-      const GOOGLE_MAPS_API_KEY = 'YOUR_GOOGLE_MAPS_API_KEY'; // API anahtarınızı buraya ekleyin
-      
-      const origin = `${start.latitude},${start.longitude}`;
-      const destination = `${end.latitude},${end.longitude}`;
-      
-      const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${destination}&mode=walking&key=${GOOGLE_MAPS_API_KEY}`;
-      
       const response = await fetch(url);
       const data = await response.json();
-      
-      if (data.status === 'OK' && data.routes.length > 0) {
-        // Polyline decode et
-        const points = data.routes[0].overview_polyline.points;
-        const decodedCoords = decodePolyline(points);
-        setRouteCoordinates(decodedCoords);
-        return decodedCoords;
-      } else {
-        // API başarısız olursa fallback olarak düz çizgi kullan
-        console.log('Directions API failed, using fallback');
+
+      if (!response.ok) {
+        console.warn('[ODOS API] HTTP', response.status, data?.error || response.statusText);
         const fallbackCoords = generateFallbackRoute(start, end);
         setRouteCoordinates(fallbackCoords);
+        setRouteStatsFromApi(null);
         return fallbackCoords;
       }
+
+      if (data.error || !Array.isArray(data.routes) || data.routes.length === 0) {
+        console.warn('[ODOS API] Empty or error:', data.error);
+        const fallbackCoords = generateFallbackRoute(start, end);
+        setRouteCoordinates(fallbackCoords);
+        setRouteStatsFromApi(null);
+        return fallbackCoords;
+      }
+
+      const routeColors = { fastest: '#D32F2F', balanced: '#00897B', easiest: '#43A047' };
+      const routeIcons = { fastest: 'flash', balanced: 'fitness', easiest: 'leaf' };
+      const descriptions = {
+        fastest: 'Tobler ile tahmini en kısa süre.',
+        balanced: 'Süre ve yokuş dengesi. Günlük yürüyüş için uygun.',
+        easiest: 'Eğim değişimi az, olabildiğince düz rota.',
+      };
+      const cards = data.routes.map((r, idx) => {
+        const coords = (r.coordinates || []).map(([lat, lon]) => ({ latitude: lat, longitude: lon }));
+        const hasElev = r.elevationProfile && r.elevationProfile.length > 0;
+        const elevationData = hasElev
+          ? r.elevationProfile.map((p) => Math.round(p.elevM))
+          : [0, Math.round((r.totalClimbM || 0) * 0.5)];
+        return {
+          id: idx + 1,
+          type: r.type || 'fastest',
+          label: r.label || 'Rota',
+          description: descriptions[r.type] || r.label || 'Rota',
+          totalClimb: `${Math.round(r.totalClimbM || 0)}m`,
+          distance: `${(r.distanceKm != null ? r.distanceKm : 0).toFixed(1)} km`,
+          duration: `${Math.round(r.durationMin != null ? r.durationMin : 0)} dk`,
+          calories: '—',
+          avgSlope: '—',
+          color: routeColors[r.type] || '#4ECDC4',
+          icon: routeIcons[r.type] || 'fitness',
+          elevationData,
+          elevationProfile: r.elevationProfile || null,
+          coordinates: coords,
+          recommended: r.type === 'balanced',
+        };
+      });
+
+      const uniqueCards = deduplicateRoutesByPath(cards);
+      setRouteStatsFromApi(uniqueCards);
+      const defaultRoute = uniqueCards.find((c) => c.recommended) || uniqueCards[0];
+      const defaultIndex = uniqueCards.findIndex((c) => c.recommended);
+      setSelectedRouteIndex(defaultIndex >= 0 ? defaultIndex : 0);
+      const coordsToShow = defaultRoute.coordinates && defaultRoute.coordinates.length > 0
+        ? defaultRoute.coordinates
+        : (uniqueCards[0].coordinates && uniqueCards[0].coordinates.length > 0 ? uniqueCards[0].coordinates : []);
+      setRouteCoordinates(coordsToShow);
+      console.log('[ODOS API] OK: unique routes', uniqueCards.length, 'default points:', coordsToShow.length);
+      return coordsToShow;
     } catch (error) {
-      console.error('Route fetch error:', error);
-      // Hata durumunda fallback
+      console.error('[ODOS API] Network error:', error?.message || error);
       const fallbackCoords = generateFallbackRoute(start, end);
       setRouteCoordinates(fallbackCoords);
       return fallbackCoords;
@@ -660,10 +748,36 @@ export default function MapScreen() {
               </Marker>
             )}
 
-            {/* Rota çizgisi - iki nokta seçildiğinde göster */}
-            {routeCoordinates.length > 0 && !selectedRoute && (
+            {/* Rota çizgileri: API'den gelen tüm seçenekler (Google Maps tarzı) */}
+            {routeStatsFromApi && routeStatsFromApi.length > 0 && !selectedRoute && (
               <>
-                {/* Soft gölge */}
+                {routeStatsFromApi.map((route, index) => {
+                  const coords = route.coordinates || [];
+                  if (coords.length === 0) return null;
+                  const isSelected = index === selectedRouteIndex;
+                  const strokeWidth = isSelected ? 6 : 3;
+                  return (
+                    <Polyline
+                      key={`route-opt-${route.id}-${index}`}
+                      coordinates={coords}
+                      strokeColor={route.color || '#00897B'}
+                      strokeWidth={strokeWidth}
+                      lineCap="round"
+                      lineJoin="round"
+                      tappable
+                      onPress={() => {
+                        setSelectedRouteIndex(index);
+                        setRouteCoordinates(coords);
+                      }}
+                    />
+                  );
+                })}
+              </>
+            )}
+
+            {/* Tek rota (fallback / API yok): iki nokta seçildiğinde */}
+            {routeCoordinates.length > 0 && !routeStatsFromApi?.length && !selectedRoute && (
+              <>
                 <Polyline
                   coordinates={routeCoordinates}
                   strokeColor="rgba(0, 0, 0, 0.08)"
@@ -671,7 +785,6 @@ export default function MapScreen() {
                   lineCap="round"
                   lineJoin="round"
                 />
-                {/* Ana siyah çizgi - ince ve zarif */}
                 <Polyline
                   coordinates={routeCoordinates}
                   strokeColor="#1A1A2E"
@@ -679,7 +792,6 @@ export default function MapScreen() {
                   lineCap="round"
                   lineJoin="round"
                 />
-                {/* Üst parlak efekt */}
                 <Polyline
                   coordinates={routeCoordinates}
                   strokeColor="rgba(255, 255, 255, 0.3)"
@@ -754,6 +866,8 @@ export default function MapScreen() {
                       setStartAddress('');
                       setStartPoint(null);
                       setRouteCoordinates([]);
+                      setRouteStatsFromApi(null);
+                      setSelectedRouteIndex(0);
                     }}
                   >
                     <Ionicons name="close-circle" size={18} color="#CCC" />
@@ -787,6 +901,8 @@ export default function MapScreen() {
                       setEndPoint(null);
                       setRouteCoordinates([]);
                       setSelectedRoute(null);
+                      setRouteStatsFromApi(null);
+                      setSelectedRouteIndex(0);
                     }}
                   >
                     <Ionicons name="close-circle" size={18} color="#CCC" />
@@ -1049,6 +1165,30 @@ export default function MapScreen() {
             </View>
           )}
 
+          {/* Rota seçenekleri - modal kapatıldıktan sonra tekrar açmak için; Rota iptal */}
+          {routeStatsFromApi && routeStatsFromApi.length > 0 && !isNavigating && (
+            <View style={styles.routeOptionsPillWrap}>
+              <TouchableOpacity
+                style={[styles.routeOptionsPill, styles.routeOptionsPillSecondary]}
+                onPress={handleCancelRoute}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="close-circle-outline" size={20} color="#666" />
+                <Text style={styles.routeOptionsPillTextSecondary}>Rota iptal</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.routeOptionsPill}
+                onPress={() => setShowRouteSelection(true)}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="options-outline" size={20} color="#FFF" />
+                <Text style={styles.routeOptionsPillText}>
+                  Rota seçenekleri {routeStatsFromApi.length > 1 ? `(${routeStatsFromApi.length})` : ''}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
           {/* Harita Kontrolleri */}
           <View style={styles.mapControls}>
             {/* Konum Butonu */}
@@ -1114,6 +1254,7 @@ export default function MapScreen() {
         visible={showRouteSelection}
         onClose={() => setShowRouteSelection(false)}
         onSelectRoute={handleRouteSelect}
+        routes={routeStatsFromApi}
         startLocation={startAddress || 'Konumunuz'}
         endLocation={endAddress || 'Hedef'}
       />
@@ -1366,6 +1507,46 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 120,
     right: 20,
+  },
+  routeOptionsPillWrap: {
+    position: 'absolute',
+    bottom: 128,
+    left: 20,
+    right: 20,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 10,
+  },
+  routeOptionsPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    backgroundColor: '#4ECDC4',
+    borderRadius: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  routeOptionsPillSecondary: {
+    backgroundColor: '#FFF',
+    borderWidth: 1,
+    borderColor: '#DDD',
+  },
+  routeOptionsPillText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#FFF',
+  },
+  routeOptionsPillTextSecondary: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#666',
   },
   controlButton: {
     width: 48,
