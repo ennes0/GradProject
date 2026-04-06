@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import {
   View,
   StyleSheet,
@@ -16,11 +16,43 @@ import { Colors } from '../../constants/Colors';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-export default function RouteSelectionModal({ visible, onClose, onSelectRoute, routes, startLocation, endLocation }) {
+const getCoordinateAtDistanceKm = (route, distKm) => {
+  const target = Math.max(0, Number(distKm) || 0);
+  const shape = Array.isArray(route?.shapePoints) ? route.shapePoints : null;
+  if (shape && shape.length > 0) {
+    if (shape.length === 1) {
+      return { latitude: Number(shape[0].lat), longitude: Number(shape[0].lon) };
+    }
+    for (let i = 0; i < shape.length - 1; i++) {
+      const a = shape[i];
+      const b = shape[i + 1];
+      const da = Number(a.distKm) || 0;
+      const db = Number(b.distKm) || 0;
+      if (target <= db) {
+        const span = Math.max(1e-9, db - da);
+        const t = Math.max(0, Math.min(1, (target - da) / span));
+        return {
+          latitude: Number(a.lat) + (Number(b.lat) - Number(a.lat)) * t,
+          longitude: Number(a.lon) + (Number(b.lon) - Number(a.lon)) * t,
+        };
+      }
+    }
+    const last = shape[shape.length - 1];
+    return { latitude: Number(last.lat), longitude: Number(last.lon) };
+  }
+  const coordinates = route?.coordinates;
+  if (!coordinates || coordinates.length === 0) return null;
+  return coordinates[Math.min(coordinates.length - 1, Math.round((coordinates.length - 1) * Math.min(1, target)))];
+};
+
+export default function RouteSelectionModal({
+  visible, onClose, onSelectRoute, routes, startLocation, endLocation, onProfilePointChange,
+}) {
   const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const dragY = useRef(new Animated.Value(0)).current;
   const isClosingRef = useRef(false);
+  const [activeChartByRouteId, setActiveChartByRouteId] = useState({});
 
   // Pan Responder for drag to dismiss
   const panResponder = useRef(
@@ -69,8 +101,11 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
           useNativeDriver: true,
         }),
       ]).start();
+    } else {
+      setActiveChartByRouteId({});
+      onProfilePointChange?.(null);
     }
-  }, [visible]);
+  }, [visible, onProfilePointChange]);
 
   const handleClose = (selectedRoute = null) => {
     if (isClosingRef.current) return;
@@ -99,16 +134,16 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
   const defaultRoutes = [
     {
       id: 1,
-      type: 'fastest',
-      label: 'En Hızlı',
-      description: 'Tobler ile tahmini en kısa süre.',
+      type: 'shortest',
+      label: 'En Kısa',
+      description: 'Toplam yol uzunluğu en kısa (saf graf mesafesi).',
       totalClimb: '86m',
       distance: '1.9 km',
       duration: '15 dk',
       calories: '220 kcal',
-      avgSlope: '%12',
-      color: '#FF6B6B',
-      icon: 'flash',
+      avgSlope: '~12% ort.',
+      color: '#1565C0',
+      icon: 'map-outline',
       elevationData: [2, 10, 25, 40, 55, 65, 72, 78, 82, 86],
     },
     {
@@ -120,7 +155,7 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
       distance: '2.4 km',
       duration: '18 dk',
       calories: '185 kcal',
-      avgSlope: '%5',
+      avgSlope: '~5% ort.',
       color: Colors.primary,
       icon: 'fitness',
       elevationData: [2, 5, 10, 15, 20, 28, 35, 40, 43, 45],
@@ -135,7 +170,7 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
       distance: '2.8 km',
       duration: '22 dk',
       calories: '145 kcal',
-      avgSlope: '%2',
+      avgSlope: '~2% ort.',
       color: '#4CAF50',
       icon: 'leaf',
       elevationData: [2, 3, 4, 5, 7, 9, 10, 12, 14, 15],
@@ -144,7 +179,7 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
 
   const routeData = (routes && Array.isArray(routes) && routes.length > 0) ? routes : defaultRoutes;
 
-  const renderElevationChart = (data, color, routeId) => {
+  const renderElevationChart = (route, data, color, routeId) => {
     const safeData = (data && Array.isArray(data) && data.length >= 2) ? data : [0, 10];
     const chartWidth = SCREEN_WIDTH - 100;
     const chartHeight = 50;
@@ -165,6 +200,8 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
       const y = valueToY(value);
       return { x, y, value };
     });
+    const activeIdx = activeChartByRouteId[routeId];
+    const activePoint = (typeof activeIdx === 'number' && points[activeIdx]) ? points[activeIdx] : null;
     
     let pathD = `M ${points[0].x} ${points[0].y}`;
     for (let i = 1; i < points.length; i++) {
@@ -185,8 +222,37 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
       yLabels.push({ value: Math.round(val), y: valueToY(val) });
     }
     
+    const updateFromTouch = (x) => {
+      const xClamped = Math.max(graphLeft, Math.min(graphLeft + graphWidth, x));
+      const ratio = graphWidth > 0 ? (xClamped - graphLeft) / graphWidth : 0;
+      const idx = Math.min(safeData.length - 1, Math.max(0, Math.round(ratio * (safeData.length - 1))));
+      setActiveChartByRouteId((prev) => ({ ...prev, [routeId]: idx }));
+      const profile = route?.elevationProfile;
+      const coords = route?.coordinates;
+      if (profile && Array.isArray(profile) && profile[idx] && coords && coords.length > 0) {
+        const distKm = profile[idx].distKm ?? 0;
+        const coord = getCoordinateAtDistanceKm(route, distKm);
+        if (coord) {
+          onProfilePointChange?.({
+            routeId,
+            distKm,
+            elevM: profile[idx].elevM ?? null,
+            coordinate: coord,
+          });
+        }
+      }
+    };
+
     return (
       <View style={styles.chartWrapper}>
+        <View
+          onStartShouldSetResponder={() => true}
+          onMoveShouldSetResponder={() => true}
+          onResponderGrant={(evt) => updateFromTouch(evt.nativeEvent.locationX)}
+          onResponderMove={(evt) => updateFromTouch(evt.nativeEvent.locationX)}
+          onResponderRelease={() => {}}
+          onResponderTerminate={() => {}}
+        >
         <Svg width={chartWidth} height={chartHeight + 16}>
           <Defs>
             <LinearGradient id={`gradient-${routeId}`} x1="0%" y1="0%" x2="0%" y2="100%">
@@ -202,6 +268,20 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
           
           <Path d={areaPath} fill={`url(#gradient-${routeId})`} />
           <Path d={pathD} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+          {activePoint && (
+            <>
+              <Line
+                x1={activePoint.x}
+                y1={padding}
+                x2={activePoint.x}
+                y2={chartHeight - padding}
+                stroke={color}
+                strokeWidth="1.5"
+                strokeDasharray="3,2"
+              />
+              <Circle cx={activePoint.x} cy={activePoint.y} r="4" fill="#FFF" stroke={color} strokeWidth="2" />
+            </>
+          )}
           
           <Circle cx={points[0].x} cy={points[0].y} r="3" fill="#FFF" stroke={color} strokeWidth="2" />
           <Circle cx={points[points.length - 1].x} cy={points[points.length - 1].y} r="3" fill="#FFF" stroke={color} strokeWidth="2" />
@@ -221,6 +301,7 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
           <SvgText x={graphLeft} y={chartHeight + 12} fontSize="9" fill="#AAA" textAnchor="start">Başlangıç</SvgText>
           <SvgText x={chartWidth - padding} y={chartHeight + 12} fontSize="9" fill="#AAA" textAnchor="end">Bitiş</SvgText>
         </Svg>
+        </View>
       </View>
     );
   };
@@ -327,9 +408,11 @@ export default function RouteSelectionModal({ visible, onClose, onSelectRoute, r
               <View style={styles.elevationSection}>
                 <View style={styles.elevationHeader}>
                   <Text style={styles.elevationLabel}>Yükselti Profili</Text>
-                  <Text style={styles.slopeText}>Ort. Eğim: {route.avgSlope}</Text>
+                  {route.avgSlope ? (
+                    <Text style={styles.slopeText}>Ort. eğim: {route.avgSlope}</Text>
+                  ) : null}
                 </View>
-                {renderElevationChart(route.elevationData ?? [0, 10], route.color, route.id)}
+                {renderElevationChart(route, route.elevationData ?? [0, 10], route.color, route.id)}
               </View>
 
               {/* Select Button */}

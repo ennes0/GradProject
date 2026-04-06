@@ -61,7 +61,11 @@ public class InMemoryGraph {
     /** Düğüm: osmid, lon, lat, rakim (m) */
     public record NodeRecord(long osmid, double lon, double lat, double rakim) {}
 
-    /** Kenar: tablo fid (id), komşu düğüm id, u→v maliyeti, v→u maliyeti, uzunluk (m), u→v yönünde tırmanış (m), u→v yönünde iniş (m) */
+    /**
+     * Kenar: fid, komşu, maliyetler, uzunluk (m), u→v tırmanış/iniş (m),
+     * u→v yönünde ortalama işaretli eğim (rise/run) ve ortalama |eğim| (rise/run).
+     */
     public record EdgeRecord(long edgeId, long neighborId, double costForward, double costBackward, double lengthM,
-                             double ascentM, double descentM) {}
+                             double ascentM, double descentM,
+                             double meanGradeSignedRatio, double meanAbsGradeRatio) {}
 }

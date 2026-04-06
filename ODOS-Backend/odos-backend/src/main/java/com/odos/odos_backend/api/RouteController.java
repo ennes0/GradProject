@@ -10,7 +10,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Rota API: GET /v1/route (tek rota), GET /v1/routes (3 öneri: En Kısa, En Hızlı, En Kolay).
+ * Rota API: GET /v1/route (tek rota, en kısa mesafe), GET /v1/routes (En Kısa, Dengeli, En Kolay).
  */
 @RestController
 @RequestMapping("/v1")

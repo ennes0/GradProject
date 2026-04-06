@@ -2,6 +2,7 @@ package com.odos.odos_backend.graph;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -21,10 +22,17 @@ public class GraphLoader {
     private static final Logger log = LoggerFactory.getLogger(GraphLoader.class);
 
     private final JdbcTemplate jdbc;
+    private final boolean loadEdgeGeometry;
+    private final int spatialGridCells;
     private InMemoryGraph graph;
+    private NodeSpatialIndex spatialIndex;
 
-    public GraphLoader(JdbcTemplate jdbc) {
+    public GraphLoader(JdbcTemplate jdbc,
+                       @Value("${odos.graph.load-edge-geometry:false}") boolean loadEdgeGeometry,
+                       @Value("${odos.graph.spatial-grid:64}") int spatialGridCells) {
         this.jdbc = jdbc;
+        this.loadEdgeGeometry = loadEdgeGeometry;
+        this.spatialGridCells = Math.max(8, Math.min(256, spatialGridCells));
     }
 
     @PostConstruct
@@ -32,14 +40,21 @@ public class GraphLoader {
         log.info("Graf yükleniyor (nodes + edges)...");
         Map<Long, InMemoryGraph.NodeRecord> nodes = loadNodes();
         Map<Long, List<InMemoryGraph.EdgeRecord>> adjacency = loadEdges();
-        Map<InMemoryGraph.EdgeKey, List<double[]>> edgeGeometries = loadEdgeGeometries();
+        Map<InMemoryGraph.EdgeKey, List<double[]>> edgeGeometries = loadEdgeGeometry
+            ? loadEdgeGeometriesFromDb()
+            : Map.of();
         this.graph = new InMemoryGraph(nodes, adjacency, edgeGeometries);
-        log.info("Graf yüklendi: {} düğüm, {} yönlü kenar, {} kenar geometrisi",
-            graph.nodeCount(), graph.edgeCount(), edgeGeometries.size());
+        this.spatialIndex = new NodeSpatialIndex(nodes, spatialGridCells);
+        log.info("Graf yüklendi: {} düğüm, {} yönlü kenar, {} kenar geometrisi (load-edge-geometry={})",
+            graph.nodeCount(), graph.edgeCount(), edgeGeometries.size(), loadEdgeGeometry);
     }
 
     public InMemoryGraph getGraph() {
         return graph;
+    }
+
+    public NodeSpatialIndex getSpatialIndex() {
+        return spatialIndex;
     }
 
     private Map<Long, InMemoryGraph.NodeRecord> loadNodes() {
@@ -57,7 +72,10 @@ public class GraphLoader {
 
     /** Kenarları yükler: her satır (u,v) için u→v ve v→u eklenir; fid, total_ascent, total_descent (u→v yönü) saklanır. */
     private Map<Long, List<InMemoryGraph.EdgeRecord>> loadEdges() {
-        String sql = "SELECT u, v, maliyet_uv, maliyet_vu, length, fid, COALESCE(total_ascent, 0) AS total_ascent, COALESCE(total_descent, 0) AS total_descent FROM edges";
+        String sql = "SELECT u, v, maliyet_uv, maliyet_vu, length, fid, "
+            + "COALESCE(total_ascent, 0) AS total_ascent, COALESCE(total_descent, 0) AS total_descent, "
+            + "COALESCE(mean_grade, 0) AS mean_grade, COALESCE(mean_absolute_grade, 0) AS mean_absolute_grade "
+            + "FROM edges";
         Map<Long, List<InMemoryGraph.EdgeRecord>> adj = new HashMap<>();
         jdbc.query(sql, rs -> {
             long u = rs.getLong("u");
@@ -68,14 +86,18 @@ public class GraphLoader {
             long fid = rs.getLong("fid");
             double ascentUV = rs.getDouble("total_ascent");
             double descentUV = rs.getDouble("total_descent");
-            adj.computeIfAbsent(u, k -> new ArrayList<>()).add(new InMemoryGraph.EdgeRecord(fid, v, costUV, costVU, length, ascentUV, descentUV));
-            adj.computeIfAbsent(v, k -> new ArrayList<>()).add(new InMemoryGraph.EdgeRecord(fid, u, costVU, costUV, length, descentUV, ascentUV));
+            double meanGrade = rs.getDouble("mean_grade");
+            double meanAbs = rs.getDouble("mean_absolute_grade");
+            adj.computeIfAbsent(u, k -> new ArrayList<>()).add(
+                new InMemoryGraph.EdgeRecord(fid, v, costUV, costVU, length, ascentUV, descentUV, meanGrade, meanAbs));
+            adj.computeIfAbsent(v, k -> new ArrayList<>()).add(
+                new InMemoryGraph.EdgeRecord(fid, u, costVU, costUV, length, descentUV, ascentUV, -meanGrade, meanAbs));
         });
         return adj;
     }
 
     /** Kenar geometrilerini yükler: her satır (u,v) → WKT geometrisi u→v olarak saklanır (DB sırası). */
-    private Map<InMemoryGraph.EdgeKey, List<double[]>> loadEdgeGeometries() {
+    private Map<InMemoryGraph.EdgeKey, List<double[]>> loadEdgeGeometriesFromDb() {
         Map<InMemoryGraph.EdgeKey, List<double[]>> map = new HashMap<>();
         try {
             String sql = "SELECT u, v, ST_AsText(ST_Transform(geom, 4326)) AS wkt FROM edges WHERE geom IS NOT NULL";

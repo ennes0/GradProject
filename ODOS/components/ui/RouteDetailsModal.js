@@ -170,26 +170,28 @@ export default function RouteDetailsModal({ visible, onClose, route, onStartNavi
     backgroundGradientFrom: '#FFFFFF',
     backgroundGradientTo: '#FFFFFF',
     decimalPlaces: 0,
-    color: (opacity = 1) => `rgba(78, 205, 196, ${opacity})`,
-    labelColor: (opacity = 1) => `rgba(160, 160, 160, ${opacity})`,
+    color: (opacity = 1) => `rgba(15, 23, 42, ${opacity})`, // #0F172A
+    labelColor: (opacity = 1) => `rgba(100, 116, 139, ${opacity})`, // #64748B
     style: { borderRadius: 16 },
     propsForDots: {
-      r: '3',
-      strokeWidth: '1',
+      r: '4',
+      strokeWidth: '2',
       stroke: Colors.primary,
     },
     propsForBackgroundLines: {
-      strokeDasharray: '4,4',
-      stroke: '#F0F0F0',
+      strokeDasharray: '',
+      stroke: '#F1F5F9',
       strokeWidth: 1,
     },
     fillShadowGradient: Colors.primary,
-    fillShadowGradientOpacity: 0.15,
+    fillShadowGradientOpacity: 0.1,
   };
 
   const StatCard = ({ icon, label, value }) => (
     <View style={styles.statCard}>
-      <Ionicons name={icon} size={20} color={Colors.primary} />
+      <View style={styles.statIconWrap}>
+        <Ionicons name={icon} size={22} color={Colors.primary} />
+      </View>
       <Text style={styles.statValue}>{value}</Text>
       <Text style={styles.statLabel}>{label}</Text>
     </View>
@@ -198,8 +200,13 @@ export default function RouteDetailsModal({ visible, onClose, route, onStartNavi
   const ChartCard = ({ title, subtitle, children }) => (
     <View style={styles.chartCard}>
       <View style={styles.chartHeader}>
-        <Text style={styles.chartTitle}>{title}</Text>
-        {subtitle && <Text style={styles.chartSubtitle}>{subtitle}</Text>}
+        <View style={styles.chartHeaderLeft}>
+          <Text style={styles.chartTitle}>{title}</Text>
+          {subtitle && <Text style={styles.chartSubtitle}>{subtitle}</Text>}
+        </View>
+        <View style={styles.chartIcon}>
+          <Ionicons name="analytics" size={16} color={Colors.primary} />
+        </View>
       </View>
       <View style={styles.chartContainer}>
         {children}
@@ -236,16 +243,16 @@ export default function RouteDetailsModal({ visible, onClose, route, onStartNavi
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
-            <Text style={styles.headerTitle} numberOfLines={1}>{route.name}</Text>
+            <Text style={styles.headerTitle} numberOfLines={1}>{route.name || 'Rota Detayı'}</Text>
             <View style={styles.locationRow}>
               <Ionicons name="location" size={14} color={Colors.primary} />
               <Text style={styles.locationText} numberOfLines={1}>
-                {route.startLocation} → {route.endLocation}
+                {route.startLocation ? `${route.startLocation} → ${route.endLocation}` : 'Harita üzerinde gösterilen rota'}
               </Text>
             </View>
           </View>
           <TouchableOpacity onPress={onClose} style={styles.closeButton}>
-            <Ionicons name="close" size={24} color="#666" />
+            <Ionicons name="close" size={24} color="#64748B" />
           </TouchableOpacity>
         </View>
 
@@ -254,28 +261,28 @@ export default function RouteDetailsModal({ visible, onClose, route, onStartNavi
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.scrollContent}
         >
-          {/* Stats Grid */}
-          <View style={styles.statsGrid}>
-            <StatCard icon="navigate" label="Mesafe" value={route.distance} />
-            <StatCard icon="time" label="Süre" value={route.duration} />
-            <StatCard icon="flame" label="Kalori" value={`${route.calories}`} />
-            <StatCard icon="footsteps" label="Adım" value={route.steps?.toLocaleString() || '0'} />
-          </View>
-
           {/* Difficulty & Info Row */}
           <View style={styles.infoRow}>
-            <View style={styles.infoBadge}>
+            <View style={[styles.infoBadge, { backgroundColor: diffConfig.color + '15' }]}>
               <Ionicons name={diffConfig.icon} size={16} color={diffConfig.color} />
               <Text style={[styles.infoBadgeText, { color: diffConfig.color }]}>{diffConfig.label}</Text>
             </View>
             <View style={styles.infoBadge}>
-              <Ionicons name="trending-up" size={16} color="#666" />
-              <Text style={styles.infoBadgeText}>Maks. {route.maxSlope}</Text>
+              <Ionicons name="trending-up" size={16} color="#64748B" />
+              <Text style={styles.infoBadgeText}>Maks. Eğim {route.maxSlope || '%8'}</Text>
             </View>
             <View style={styles.infoBadge}>
-              <Ionicons name="arrow-up" size={16} color="#666" />
-              <Text style={styles.infoBadgeText}>{route.elevationGain || '48m'}</Text>
+              <Ionicons name="arrow-up" size={16} color="#64748B" />
+              <Text style={styles.infoBadgeText}>{route.elevationGain || '48m'} Çıkış</Text>
             </View>
+          </View>
+
+          {/* Stats Grid */}
+          <View style={styles.statsGrid}>
+            <StatCard icon="navigate" label="Mesafe" value={route.distance || '0 km'} />
+            <StatCard icon="time" label="Tahmini Süre" value={route.duration || '0 dk'} />
+            <StatCard icon="flame" label="Yakılacak" value={`${route.calories || '0'} kcal`} />
+            <StatCard icon="footsteps" label="Tahmini Adım" value={route.steps?.toLocaleString() || '0'} />
           </View>
 
           {/* Elevation Chart */}
@@ -493,92 +500,113 @@ const styles = StyleSheet.create({
   // Info Row
   infoRow: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 8,
     marginBottom: 20,
   },
   infoBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FFF',
+    backgroundColor: '#FFFFFF',
     paddingHorizontal: 12,
     paddingVertical: 8,
-    borderRadius: 10,
+    borderRadius: 12,
     gap: 6,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
   },
   infoBadgeText: {
     fontSize: 13,
-    fontWeight: '500',
-    color: '#666',
+    fontWeight: '700',
+    color: '#334155',
   },
 
   // Stats Grid
   statsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 10,
-    marginBottom: 16,
+    gap: 12,
+    marginBottom: 24,
   },
   statCard: {
-    flex: 1,
-    minWidth: '47%',
-    backgroundColor: '#FFF',
-    borderRadius: 14,
+    width: (SCREEN_WIDTH - 52) / 2,
+    backgroundColor: '#FFFFFF',
     padding: 16,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#F1F5F9',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.03,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  statIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#F0FDF4',
     alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
   },
   statValue: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#1A1A2E',
-    marginTop: 8,
-    marginBottom: 2,
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginBottom: 4,
   },
   statLabel: {
-    fontSize: 12,
-    color: '#888',
-    fontWeight: '500',
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#64748B',
   },
 
   // Chart Cards
   chartCard: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    padding: 16,
+    borderRadius: 24,
+    padding: 20,
     marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
+    borderWidth: 1,
+    borderColor: '#F1F5F9',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.04,
+    shadowRadius: 12,
     elevation: 3,
   },
   chartHeader: {
-    marginBottom: 12,
-  },
-  chartTitleRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 16,
   },
-  chartIconBg: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
+  chartHeaderLeft: {
+    flex: 1,
+  },
+  chartIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F8FAFC',
     alignItems: 'center',
     justifyContent: 'center',
   },
   chartTitle: {
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: '700',
-    color: '#1A1A2E',
+    color: '#0F172A',
+    marginBottom: 4,
   },
   chartSubtitle: {
-    fontSize: 12,
-    color: '#888',
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#64748B',
     marginTop: 2,
   },
   chartContainer: {
     alignItems: 'center',
-    marginHorizontal: -8,
+    marginLeft: -10, // Chart.js negative margin fix
   },
   chart: {
     borderRadius: 16,
@@ -587,52 +615,58 @@ const styles = StyleSheet.create({
   // Details Card
   detailsCard: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 16,
+    borderRadius: 24,
+    padding: 20,
     marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#F1F5F9',
   },
   detailsTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#1A1A2E',
-    marginBottom: 12,
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#0F172A',
+    marginBottom: 16,
   },
   detailRow: {
     flexDirection: 'row',
-    gap: 12,
-    marginBottom: 10,
+    marginBottom: 16,
   },
   detailItem: {
     flex: 1,
   },
   detailLabel: {
     fontSize: 12,
-    color: '#888',
-    marginBottom: 2,
+    color: '#94A3B8',
+    fontWeight: '600',
+    marginBottom: 4,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
   detailValue: {
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '600',
-    color: '#1A1A2E',
+    color: '#334155',
   },
 
   // Notes Card
   notesCard: {
-    backgroundColor: '#FFF',
-    borderRadius: 16,
+    backgroundColor: '#FFFBEB',
+    borderRadius: 20,
     padding: 16,
+    borderWidth: 1,
+    borderColor: '#FEF3C7',
     marginBottom: 16,
   },
   notesTitle: {
     fontSize: 15,
-    fontWeight: '600',
-    color: '#1A1A2E',
+    fontWeight: '700',
+    color: '#D97706',
     marginBottom: 8,
   },
   notesText: {
     fontSize: 14,
-    color: '#666',
-    lineHeight: 20,
+    color: '#92400E',
+    lineHeight: 22,
   },
 
   // Footer
@@ -644,18 +678,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingVertical: 14,
+    paddingTop: 16,
     paddingBottom: 28,
-    backgroundColor: '#FFF',
+    backgroundColor: '#FFFFFF',
     borderTopWidth: 1,
-    borderTopColor: '#F0F0F0',
-    gap: 10,
+    borderTopColor: '#F1F5F9',
+    gap: 12,
   },
   iconButton: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: '#F5F5F5',
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: '#F8FAFC',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -664,14 +698,33 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: Colors.primary,
-    paddingVertical: 14,
-    borderRadius: 23,
-    gap: 8,
+  },
+  primaryButton: {
+    flex: 1,
+    flexDirection: 'row',
+    height: 52,
+    backgroundColor: Colors.primaryDark,
+    borderRadius: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: Colors.primaryDark,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 8,
   },
   primaryButtonText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#FFF',
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    marginRight: 8,
+  },
+  primaryButtonIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });

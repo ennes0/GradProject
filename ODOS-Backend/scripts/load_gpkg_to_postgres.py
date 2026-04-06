@@ -27,15 +27,35 @@ import numpy as np
 # Bağlantı: ODOS_DB_URL kullan veya varsayılan (şifreyi kendin yaz)
 DATABASE_URL = os.environ.get(
     "ODOS_DB_URL",
-    "postgresql://postgres:179492@localhost:5432/odos_routing"
+    "postgresql://postgres:1234@localhost:5432/odos_routing2"
 )
 
-GPKG_PATH = os.path.join(ROOT, "graphRelatedFiles/istanbul_avrupa_asimetrik_graf_v5.gpkg")
+def resolve_gpkg_path() -> str:
+    """Env override varsa onu kullan; yoksa eldeki en yeni bilinen graf dosyasını seç."""
+    env_path = os.environ.get("ODOS_GPKG_PATH")
+    if env_path:
+        return env_path
+
+    candidates = [
+        os.path.join(ROOT, "graphRelatedFiles/istanbul_avrupa_asimetrik_graf_v6.gpkg"),
+        os.path.join(ROOT, "graphRelatedFiles/istanbul_avrupa_asimetrik_graf_v5.gpkg"),
+        os.path.join(ROOT, "graphRelatedFiles/istanbul_avrupa_asimetrik_graf.gpkg"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+
+    # Adaylardan ilki döndürülür; main() içinde kullanıcıya anlamlı hata basılır.
+    return candidates[0]
+
+
+GPKG_PATH = resolve_gpkg_path()
 
 
 def main():
     if not os.path.isfile(GPKG_PATH):
         print(f"HATA: GPKG bulunamadı: {GPKG_PATH}")
+        print("İpucu: ODOS_GPKG_PATH ortam değişkeni ile dosya yolunu verebilirsin.")
         return 1
 
     try:
@@ -110,6 +130,11 @@ def main():
 
     print("PostgreSQL'e bağlanılıyor...")
     engine = create_engine(DATABASE_URL)
+
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
+        conn.commit()
 
     print("nodes yazılıyor...")
     nodes_gdf.to_postgis("nodes", engine, if_exists="replace", index=False)

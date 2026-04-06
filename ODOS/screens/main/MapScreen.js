@@ -14,17 +14,71 @@ import {
   Image,
   StatusBar,
 } from 'react-native';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import RouteSelectionModal from '../../components/ui/RouteSelectionModal';
 import NavigationView from '../../components/ui/NavigationView';
+import SessionSummaryScreen from './SessionSummaryScreen';
 import { useMapPreload } from '../../components/context/MapPreloadContext';
 import { getRouteUrl, getRoutesUrl } from '../../config/api';
+import { getMapProvider } from '../../constants/mapProvider';
 import Svg, { Path, Circle, Ellipse } from 'react-native-svg';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+
+/** API blok ortalaması |eğim| (%) — yeşil → sarı → turuncu → kırmızı (ara değerler RGB lerp) */
+function slopeAvgAbsPctToColor(pct) {
+  const p = Math.max(0, Number(pct) || 0);
+  const stops = [
+    [0, [0x43, 0xa0, 0x47]],
+    [4, [0xcd, 0xdc, 0x39]],
+    [8, [0xff, 0xeb, 0x3b]],
+    [12, [0xff, 0x98, 0x00]],
+    [18, [0xe5, 0x39, 0x35]],
+  ];
+  const last = stops[stops.length - 1];
+  if (p >= last[0]) {
+    const c = last[1];
+    const h = (n) => n.toString(16).padStart(2, '0');
+    return `#${h(c[0])}${h(c[1])}${h(c[2])}`;
+  }
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [p0, c0] = stops[i];
+    const [p1, c1] = stops[i + 1];
+    if (p <= p1) {
+      const t = p <= p0 ? 0 : (p - p0) / (p1 - p0);
+      const r = Math.round(c0[0] + (c1[0] - c0[0]) * t);
+      const g = Math.round(c0[1] + (c1[1] - c0[1]) * t);
+      const b = Math.round(c0[2] + (c1[2] - c0[2]) * t);
+      const h = (n) => n.toString(16).padStart(2, '0');
+      return `#${h(r)}${h(g)}${h(b)}`;
+    }
+  }
+  return '#43A047';
+}
+
+function chunkCoordsToMapFormat(chunkCoords) {
+  if (!chunkCoords || !Array.isArray(chunkCoords)) return [];
+  return chunkCoords
+    .map((pt) => {
+      if (Array.isArray(pt) && pt.length >= 2) {
+        return { latitude: pt[0], longitude: pt[1] };
+      }
+      if (pt && typeof pt === 'object' && pt.latitude != null && pt.longitude != null) {
+        return { latitude: Number(pt.latitude), longitude: Number(pt.longitude) };
+      }
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function chunkAvgAbsSlopePct(chunk) {
+  if (!chunk || typeof chunk !== 'object') return 0;
+  const v = chunk.avgAbsSlopePct ?? chunk.avg_abs_slope_pct;
+  return Number(v) || 0;
+}
 
 // Modern Marker Bileşeni - Kullanıcı Konumu (Küçük)
 const UserLocationMarker = () => {
@@ -138,12 +192,15 @@ export default function MapScreen() {
   const [showRouteSelection, setShowRouteSelection] = useState(false);
   const [selectedRoute, setSelectedRoute] = useState(null);
   const [isNavigating, setIsNavigating] = useState(false);
+  const [showSessionSummary, setShowSessionSummary] = useState(false);
+  const [sessionSummaryData, setSessionSummaryData] = useState(null);
   const [startAddress, setStartAddress] = useState('');
   const [endAddress, setEndAddress] = useState('');
   const [routeCoordinates, setRouteCoordinates] = useState([]);
   const [isLoadingRoute, setIsLoadingRoute] = useState(false);
   const [routeStatsFromApi, setRouteStatsFromApi] = useState(null); // ODOS API'den gelen rotalar (modal + harita)
   const [selectedRouteIndex, setSelectedRouteIndex] = useState(0);   // Haritada hangi rota vurgulu (0, 1, 2)
+  const [profileMapPoint, setProfileMapPoint] = useState(null);      // Profil grafiğinde seçilen konumun harita noktası
   
   // Arama state'leri
   const [activeSearchField, setActiveSearchField] = useState(null); // 'start' veya 'end'
@@ -176,18 +233,8 @@ export default function MapScreen() {
     { id: 'r2', name: 'İş', address: 'Levent, İstanbul', latitude: 41.0794, longitude: 29.0117, icon: 'briefcase' },
   ];
   
-  // Harita özelleştirme state'leri
-  const [mapType, setMapType] = useState('standard');
-  const [mapStyle, setMapStyle] = useState('standard');
-  const [showLayersMenu, setShowLayersMenu] = useState(false);
-  const [showStyleMenu, setShowStyleMenu] = useState(false);
-  const [layers, setLayers] = useState({
-    traffic: false,
-    buildings3D: false,
-    slopes: false,
-    bikeRoutes: false,
-  });
-  const [pitch, setPitch] = useState(0);
+  // Hedef seçildikten sonra üst arama kartı ve sağ kontrol butonlarını gizle
+  const shouldShowPreRouteUI = !endPoint && !selectedRoute;
   
   const mapRef = useRef(null);
   
@@ -212,6 +259,49 @@ export default function MapScreen() {
       setStartPoint(initialLocation);
     }
   }, [initialLocation]);
+
+  useEffect(() => {
+    let sub = null;
+    const startWatch = async () => {
+      if (!isNavigating) return;
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') return;
+      sub = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.BestForNavigation,
+          timeInterval: 2000,
+          distanceInterval: 3,
+        },
+        (pos) => {
+          const c = pos?.coords;
+          if (!c) return;
+          setLocation({
+            latitude: c.latitude,
+            longitude: c.longitude,
+            speed: c.speed,
+            heading: c.heading,
+          });
+        }
+      );
+    };
+    startWatch();
+    return () => {
+      if (sub) sub.remove();
+    };
+  }, [isNavigating]);
+
+  useEffect(() => {
+    if (!profileMapPoint?.coordinate || !mapRef.current || isNavigating) return;
+    mapRef.current.animateToRegion(
+      {
+        latitude: profileMapPoint.coordinate.latitude,
+        longitude: profileMapPoint.coordinate.longitude,
+        latitudeDelta: 0.008,
+        longitudeDelta: 0.008,
+      },
+      220
+    );
+  }, [profileMapPoint, isNavigating]);
 
   const getCurrentLocation = async () => {
     try {
@@ -425,6 +515,7 @@ export default function MapScreen() {
     setRouteStatsFromApi(null);
     setSelectedRouteIndex(0);
     setShowRouteSelection(false);
+    setProfileMapPoint(null);
   };
 
   const handleRouteSelect = (route) => {
@@ -438,20 +529,47 @@ export default function MapScreen() {
     setSelectedRoute({
       ...route,
       coordinates: route.coordinates || routeCoordinates,
-      difficulty: route.type === 'easiest' ? 'easy' : route.type === 'fastest' ? 'hard' : 'medium',
-      maxSlope: route.avgSlope || (route.type === 'easiest' ? '%2' : route.type === 'fastest' ? '%12' : '%5'),
-      estimatedEffort: route.type === 'easiest' ? 'Low' : route.type === 'fastest' ? 'High' : 'Medium',
+      difficulty: route.type === 'easiest' ? 'easy' : 'medium',
+      estimatedEffort: route.type === 'easiest' ? 'Low' : route.type === 'shortest' ? 'Medium' : 'Medium',
     });
     setShowRouteSelection(false);
     setIsNavigating(true);
+    setProfileMapPoint(null);
   };
 
   const handleStartNavigation = (route) => {
     setIsNavigating(true);
   };
 
-  const handleCloseNavigation = () => {
+  const handleCloseNavigation = (payload) => {
     setIsNavigating(false);
+    if (payload?.showSummary && payload?.summary) {
+      setSessionSummaryData(payload.summary);
+      setShowSessionSummary(true);
+    }
+  };
+
+  const handleCloseSessionSummary = () => {
+    setShowSessionSummary(false);
+    setSessionSummaryData(null);
+  };
+
+  const handleStartNewSession = () => {
+    setShowSessionSummary(false);
+    setSessionSummaryData(null);
+    setShowRouteSelection(false);
+    setSelectedRoute(null);
+    setEndPoint(null);
+    setEndAddress('');
+    setRouteCoordinates([]);
+    setRouteStatsFromApi(null);
+    setSelectedRouteIndex(0);
+    setProfileMapPoint(null);
+
+    if (location && Number.isFinite(location.latitude) && Number.isFinite(location.longitude)) {
+      setStartPoint({ latitude: location.latitude, longitude: location.longitude });
+      setStartAddress('Benim Konumum');
+    }
   };
 
   /** İki rotanın koordinat dizisi aynı/çok benzer mi kontrol eder */
@@ -480,7 +598,52 @@ export default function MapScreen() {
     return out.map((r, i) => ({ ...r, id: i + 1 }));
   };
 
-  // ODOS backend API: 3 rota önerisi (En Kısa, En Hızlı, En Kolay)
+  const mapApiRoutesToCards = (apiRoutes) => {
+    const routeColors = { shortest: '#1565C0', balanced: '#00897B', easiest: '#43A047' };
+    const routeIcons = { shortest: 'map-outline', balanced: 'fitness', easiest: 'leaf' };
+    const descriptions = {
+      shortest: 'Toplam yol uzunluğu en kısa (graf mesafesi, A*).',
+      balanced: 'Tobler + hafif tırmanış cezası; süre ve yokuş dengesi.',
+      easiest: 'Eğim değişimi az, olabildiğince düz rota.',
+    };
+    return (apiRoutes || []).map((r, idx) => {
+      const coords = (r.coordinates || []).map(([lat, lon]) => ({ latitude: lat, longitude: lon }));
+      const hasElev = r.elevationProfile && r.elevationProfile.length > 0;
+      const elevationData = hasElev
+        ? r.elevationProfile.map((p) => Math.round(p.elevM))
+        : [0, Math.round((r.totalClimbM || 0) * 0.5)];
+      const kcal =
+        r.estimatedCaloriesKcal != null && Number.isFinite(r.estimatedCaloriesKcal)
+          ? `${Math.round(r.estimatedCaloriesKcal)} kcal`
+          : '—';
+      const avgSlopeStr =
+        r.avgSlopePct != null && Number.isFinite(r.avgSlopePct)
+          ? `~${Math.round(r.avgSlopePct)}% ort.`
+          : null;
+      return {
+        id: idx + 1,
+        type: r.type || 'shortest',
+        label: r.label || 'Rota',
+        description: descriptions[r.type] || r.label || 'Rota',
+        totalClimb: `${Math.round(r.totalClimbM || 0)}m`,
+        distance: `${(r.distanceKm != null ? r.distanceKm : 0).toFixed(1)} km`,
+        duration: `${Math.round(r.durationMin != null ? r.durationMin : 0)} dk`,
+        calories: kcal,
+        avgSlope: avgSlopeStr,
+        segments: r.segments || null,
+        color: routeColors[r.type] || '#4ECDC4',
+        icon: routeIcons[r.type] || 'fitness',
+        elevationData,
+        elevationProfile: r.elevationProfile || null,
+        shapePoints: Array.isArray(r.shapePoints) ? r.shapePoints : null,
+        coordinates: coords,
+        recommended: r.type === 'balanced',
+        slopePolylineChunks: Array.isArray(r.slopePolylineChunks) ? r.slopePolylineChunks : null,
+      };
+    });
+  };
+
+  // ODOS backend API: 3 rota önerisi (En Kısa mesafe, Dengeli, En Kolay)
   const fetchRouteFromAPI = async (start, end) => {
     if (!start || !end) return [];
 
@@ -510,37 +673,7 @@ export default function MapScreen() {
         return fallbackCoords;
       }
 
-      const routeColors = { fastest: '#D32F2F', balanced: '#00897B', easiest: '#43A047' };
-      const routeIcons = { fastest: 'flash', balanced: 'fitness', easiest: 'leaf' };
-      const descriptions = {
-        fastest: 'Tobler ile tahmini en kısa süre.',
-        balanced: 'Süre ve yokuş dengesi. Günlük yürüyüş için uygun.',
-        easiest: 'Eğim değişimi az, olabildiğince düz rota.',
-      };
-      const cards = data.routes.map((r, idx) => {
-        const coords = (r.coordinates || []).map(([lat, lon]) => ({ latitude: lat, longitude: lon }));
-        const hasElev = r.elevationProfile && r.elevationProfile.length > 0;
-        const elevationData = hasElev
-          ? r.elevationProfile.map((p) => Math.round(p.elevM))
-          : [0, Math.round((r.totalClimbM || 0) * 0.5)];
-        return {
-          id: idx + 1,
-          type: r.type || 'fastest',
-          label: r.label || 'Rota',
-          description: descriptions[r.type] || r.label || 'Rota',
-          totalClimb: `${Math.round(r.totalClimbM || 0)}m`,
-          distance: `${(r.distanceKm != null ? r.distanceKm : 0).toFixed(1)} km`,
-          duration: `${Math.round(r.durationMin != null ? r.durationMin : 0)} dk`,
-          calories: '—',
-          avgSlope: '—',
-          color: routeColors[r.type] || '#4ECDC4',
-          icon: routeIcons[r.type] || 'fitness',
-          elevationData,
-          elevationProfile: r.elevationProfile || null,
-          coordinates: coords,
-          recommended: r.type === 'balanced',
-        };
-      });
+      const cards = mapApiRoutesToCards(data.routes);
 
       const uniqueCards = deduplicateRoutesByPath(cards);
       setRouteStatsFromApi(uniqueCards);
@@ -560,6 +693,35 @@ export default function MapScreen() {
       return fallbackCoords;
     } finally {
       setIsLoadingRoute(false);
+    }
+  };
+
+  const handleRerouteRequest = async (currentCoord) => {
+    if (!currentCoord || !endPoint || isLoadingRoute) return false;
+    try {
+      const url = getRoutesUrl(currentCoord.latitude, currentCoord.longitude, endPoint.latitude, endPoint.longitude);
+      const response = await fetch(url);
+      const data = await response.json();
+      if (!response.ok || data?.error || !Array.isArray(data?.routes) || data.routes.length === 0) {
+        return false;
+      }
+      const cards = deduplicateRoutesByPath(mapApiRoutesToCards(data.routes));
+      setRouteStatsFromApi(cards);
+      const wantedType = selectedRoute?.type || 'balanced';
+      const picked = cards.find((c) => c.type === wantedType) || cards[0];
+      if (!picked) return false;
+      setSelectedRoute({
+        ...picked,
+        coordinates: picked.coordinates || [],
+        difficulty: picked.type === 'easiest' ? 'easy' : 'medium',
+        estimatedEffort: picked.type === 'easiest' ? 'Low' : 'Medium',
+      });
+      setRouteCoordinates(picked.coordinates || []);
+      setSelectedRouteIndex(Math.max(0, cards.findIndex((c) => c.id === picked.id)));
+      return true;
+    } catch (e) {
+      console.warn('[ODOS API] Reroute failed:', e?.message || e);
+      return false;
     }
   };
 
@@ -705,29 +867,20 @@ export default function MapScreen() {
           <MapView
             ref={mapRef}
             style={styles.map}
-            provider={PROVIDER_GOOGLE}
+            provider={getMapProvider()}
             initialRegion={initialRegion}
             showsUserLocation={true}
             showsMyLocationButton={false}
             showsCompass={true}
-            showsTraffic={layers.traffic}
-            showsBuildings={layers.buildings3D}
-            mapType={mapType}
-            customMapStyle={MAP_STYLES[mapStyle]}
-            pitch={pitch}
+            showsTraffic={false}
+            showsBuildings={false}
+            mapType="standard"
+            customMapStyle={MAP_STYLES.standard}
+            pitch={0}
             rotateEnabled={true}
             pitchEnabled={true}
             onPress={handleMapPress}
           >
-            {layers.slopes && slopeRoads.map((road) => (
-              <Polyline
-                key={road.id}
-                coordinates={road.coordinates}
-                strokeColor={getSlopeColor(road.slope)}
-                strokeWidth={6}
-              />
-            ))}
-
             {startPoint && (
               <Marker 
                 coordinate={startPoint} 
@@ -735,6 +888,25 @@ export default function MapScreen() {
                 tracksViewChanges={false}
               >
                 <StartMarker />
+              </Marker>
+            )}
+
+            {profileMapPoint?.coordinate && !selectedRoute && (
+              <Marker
+                coordinate={profileMapPoint.coordinate}
+                anchor={{ x: 0.5, y: 0.5 }}
+              >
+                <View style={styles.profileMarkerContainer}>
+                  <View style={styles.profileMarkerBadge}>
+                    <Text style={styles.profileMarkerText}>
+                      {`${(profileMapPoint.distKm ?? 0).toFixed(2)} km`}
+                      {profileMapPoint.elevM != null ? ` · ${Math.round(profileMapPoint.elevM)}m` : ''}
+                    </Text>
+                  </View>
+                  <View style={styles.profileMarkerOuter}>
+                    <View style={styles.profileMarkerInner} />
+                  </View>
+                </View>
               </Marker>
             )}
 
@@ -753,9 +925,37 @@ export default function MapScreen() {
               <>
                 {routeStatsFromApi.map((route, index) => {
                   const coords = route.coordinates || [];
-                  if (coords.length === 0) return null;
+                  const chunks = route.slopePolylineChunks;
                   const isSelected = index === selectedRouteIndex;
                   const strokeWidth = isSelected ? 6 : 3;
+                  if (chunks && chunks.length > 0) {
+                    return (
+                      <React.Fragment key={`route-opt-${route.id}-${index}`}>
+                        {chunks.map((chunk, ci) => {
+                          const pts = chunkCoordsToMapFormat(chunk.coordinates);
+                          if (pts.length < 2) return null;
+                          const strokeColor = slopeAvgAbsPctToColor(chunkAvgAbsSlopePct(chunk));
+                          return (
+                            <Polyline
+                              key={`route-opt-${route.id}-${index}-c${ci}`}
+                              coordinates={pts}
+                              strokeColor={strokeColor}
+                              strokeWidth={strokeWidth}
+                              lineCap="round"
+                              lineJoin="round"
+                              zIndex={1000 + ci}
+                              tappable
+                              onPress={() => {
+                                setSelectedRouteIndex(index);
+                                if (coords.length > 0) setRouteCoordinates(coords);
+                              }}
+                            />
+                          );
+                        })}
+                      </React.Fragment>
+                    );
+                  }
+                  if (coords.length === 0) return null;
                   return (
                     <Polyline
                       key={`route-opt-${route.id}-${index}`}
@@ -764,6 +964,7 @@ export default function MapScreen() {
                       strokeWidth={strokeWidth}
                       lineCap="round"
                       lineJoin="round"
+                      zIndex={800}
                       tappable
                       onPress={() => {
                         setSelectedRouteIndex(index);
@@ -805,31 +1006,68 @@ export default function MapScreen() {
             {/* Seçili rota - navigasyon için */}
             {selectedRoute && selectedRoute.coordinates && (
               <>
-                {/* Gölge */}
-                <Polyline
-                  coordinates={selectedRoute.coordinates}
-                  strokeColor="rgba(0, 0, 0, 0.1)"
-                  strokeWidth={8}
-                  lineCap="round"
-                  lineJoin="round"
-                />
-                {/* Ana çizgi */}
-                <Polyline
-                  coordinates={selectedRoute.coordinates}
-                  strokeColor="#1A1A2E"
-                  strokeWidth={4}
-                  lineCap="round"
-                  lineJoin="round"
-                />
-                {/* Yön göstergesi - kesikli iç çizgi */}
-                <Polyline
-                  coordinates={selectedRoute.coordinates}
-                  strokeColor={selectedRoute.color || '#4ECDC4'}
-                  strokeWidth={2}
-                  lineCap="round"
-                  lineJoin="round"
-                  lineDashPattern={[1, 12]}
-                />
+                {selectedRoute.slopePolylineChunks && selectedRoute.slopePolylineChunks.length > 0 ? (
+                  <>
+                    {selectedRoute.slopePolylineChunks.map((chunk, ci) => {
+                      const pts = chunkCoordsToMapFormat(chunk.coordinates);
+                      if (pts.length < 2) return null;
+                      const strokeColor = slopeAvgAbsPctToColor(chunkAvgAbsSlopePct(chunk));
+                      return (
+                        <React.Fragment key={`nav-chunk-${ci}`}>
+                          <Polyline
+                            coordinates={pts}
+                            strokeColor="rgba(0, 0, 0, 0.12)"
+                            strokeWidth={9}
+                            lineCap="round"
+                            lineJoin="round"
+                            zIndex={900 + ci}
+                          />
+                          <Polyline
+                            coordinates={pts}
+                            strokeColor={strokeColor}
+                            strokeWidth={5}
+                            lineCap="round"
+                            lineJoin="round"
+                            zIndex={900 + ci + 1}
+                          />
+                        </React.Fragment>
+                      );
+                    })}
+                    <Polyline
+                      coordinates={selectedRoute.coordinates}
+                      strokeColor={selectedRoute.color || '#4ECDC4'}
+                      strokeWidth={2}
+                      lineCap="round"
+                      lineJoin="round"
+                      lineDashPattern={[1, 12]}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <Polyline
+                      coordinates={selectedRoute.coordinates}
+                      strokeColor="rgba(0, 0, 0, 0.1)"
+                      strokeWidth={8}
+                      lineCap="round"
+                      lineJoin="round"
+                    />
+                    <Polyline
+                      coordinates={selectedRoute.coordinates}
+                      strokeColor="#1A1A2E"
+                      strokeWidth={4}
+                      lineCap="round"
+                      lineJoin="round"
+                    />
+                    <Polyline
+                      coordinates={selectedRoute.coordinates}
+                      strokeColor={selectedRoute.color || '#4ECDC4'}
+                      strokeWidth={2}
+                      lineCap="round"
+                      lineJoin="round"
+                      lineDashPattern={[1, 12]}
+                    />
+                  </>
+                )}
               </>
             )}
           </MapView>
@@ -843,6 +1081,7 @@ export default function MapScreen() {
             </View>
           )}
 
+          {shouldShowPreRouteUI && (
           <SafeAreaView style={styles.searchContainerSafe} edges={['top']}>
             {/* Modern Arama Kartı */}
             <View style={[styles.searchCard, activeSearchField && styles.searchCardExpanded]}>
@@ -1028,168 +1267,95 @@ export default function MapScreen() {
               />
             )}
           </SafeAreaView>
+          )}
 
-          {/* Katman Menüsü */}
-          {showLayersMenu && (
-            <View style={styles.layersMenu}>
-              <View style={styles.menuHeader}>
-                <Text style={styles.menuTitle}>Katmanlar</Text>
-                <TouchableOpacity onPress={() => setShowLayersMenu(false)}>
-                  <Ionicons name="close" size={24} color="#333" />
+          {/* Rota seçenekleri: seçili rota özeti (modal kapalıyken) + iptal / tekrar aç */}
+          {routeStatsFromApi && routeStatsFromApi.length > 0 && !isNavigating && !showRouteSelection && !selectedRoute && (
+            <View style={styles.floatingRouteContainer}>
+              {(() => {
+                const idx = Math.min(
+                  Math.max(0, selectedRouteIndex),
+                  routeStatsFromApi.length - 1
+                );
+                const r = routeStatsFromApi[idx];
+                const routeColor = r.color || '#4ECDC4';
+                
+                const getIconForLabel = (label) => {
+                  if (!label) return 'map-outline';
+                  const l = label.toLowerCase();
+                  if (l.includes('kolay')) return 'leaf';
+                  if (l.includes('hızlı')) return 'flash';
+                  if (l.includes('dengeli')) return 'walk';
+                  return 'analytics';
+                };
+
+                return (
+                  <TouchableOpacity
+                    style={styles.floatingRouteCard}
+                    onPress={() => setShowRouteSelection(true)}
+                    activeOpacity={0.95}
+                  >
+                    <View style={styles.cardHeaderRow}>
+                      <View style={[styles.routeBadge, { backgroundColor: routeColor + '15' }]}>
+                        <Ionicons name={getIconForLabel(r.label)} size={14} color={routeColor} />
+                        <Text style={[styles.routeBadgeText, { color: routeColor }]}>{r.label || 'Rota Seçeneği'}</Text>
+                      </View>
+                      <View style={styles.cardTimeDistance}>
+                        <Text style={styles.cardTime}>{r.duration?.replace('dk', '').trim() || '--'} dk</Text>
+                        <Text style={styles.cardDistance}>{r.distance || '--'}</Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.cardMetricsRow}>
+                      <View style={styles.metricItem}>
+                        <View style={styles.metricIconWrap}>
+                          <Ionicons name="trending-up" size={14} color="#64748B" />
+                        </View>
+                        <Text style={styles.metricText}>{r.avgSlope || '%0'}</Text>
+                      </View>
+                      <View style={styles.metricDivider} />
+                      <View style={styles.metricItem}>
+                        <View style={styles.metricIconWrap}>
+                          <Ionicons name="flame" size={14} color="#F59E0B" />
+                        </View>
+                        <Text style={styles.metricText}>{r.calories || '0 kcal'}</Text>
+                      </View>
+                      <View style={styles.metricDivider} />
+                      <View style={styles.metricItem}>
+                        <View style={styles.metricIconWrap}>
+                          <MaterialCommunityIcons name="stairs-up" size={15} color="#64748B" />
+                        </View>
+                        <Text style={styles.metricText}>{r.totalClimb || '0m'} Çıkış</Text>
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })()}
+              
+              <View style={styles.actionButtonsRow}>
+                <TouchableOpacity
+                  style={styles.cancelBtn}
+                  onPress={handleCancelRoute}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name="close" size={24} color="#64748B" />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.primaryActionBtn}
+                  onPress={() => setShowRouteSelection(true)}
+                  activeOpacity={0.9}
+                >
+                  <Text style={styles.primaryActionBtnText}>Tüm Rotaları İncele</Text>
+                  <View style={styles.badgeWrap}>
+                    <Text style={styles.badgeText}>{routeStatsFromApi.length}</Text>
+                  </View>
                 </TouchableOpacity>
               </View>
-              
-              <TouchableOpacity 
-                style={styles.layerItem}
-                onPress={() => setLayers({...layers, traffic: !layers.traffic})}
-              >
-                <Ionicons 
-                  name={layers.traffic ? "car" : "car-outline"} 
-                  size={22} 
-                  color={layers.traffic ? "#4ECDC4" : "#666"} 
-                />
-                <Text style={styles.layerText}>Trafik</Text>
-                <View style={[styles.layerToggle, layers.traffic && styles.layerToggleActive]} />
-              </TouchableOpacity>
-              
-              <TouchableOpacity 
-                style={styles.layerItem}
-                onPress={() => {
-                  setLayers({...layers, buildings3D: !layers.buildings3D});
-                  setPitch(layers.buildings3D ? 0 : 45);
-                }}
-              >
-                <Ionicons 
-                  name={layers.buildings3D ? "business" : "business-outline"} 
-                  size={22} 
-                  color={layers.buildings3D ? "#4ECDC4" : "#666"} 
-                />
-                <Text style={styles.layerText}>3D Binalar</Text>
-                <View style={[styles.layerToggle, layers.buildings3D && styles.layerToggleActive]} />
-              </TouchableOpacity>
-              
-              <TouchableOpacity 
-                style={styles.layerItem}
-                onPress={() => setLayers({...layers, slopes: !layers.slopes})}
-              >
-                <Ionicons 
-                  name={layers.slopes ? "trending-up" : "trending-up-outline"} 
-                  size={22} 
-                  color={layers.slopes ? "#4ECDC4" : "#666"} 
-                />
-                <Text style={styles.layerText}>Eğim Haritası</Text>
-                <View style={[styles.layerToggle, layers.slopes && styles.layerToggleActive]} />
-              </TouchableOpacity>
-              
-              <TouchableOpacity 
-                style={styles.layerItem}
-                onPress={() => setLayers({...layers, bikeRoutes: !layers.bikeRoutes})}
-              >
-                <Ionicons 
-                  name={layers.bikeRoutes ? "bicycle" : "bicycle-outline"} 
-                  size={22} 
-                  color={layers.bikeRoutes ? "#4ECDC4" : "#666"} 
-                />
-                <Text style={styles.layerText}>Bisiklet Yolları</Text>
-                <View style={[styles.layerToggle, layers.bikeRoutes && styles.layerToggleActive]} />
-              </TouchableOpacity>
-            </View>
-          )}
-
-          {/* Stil Menüsü */}
-          {showStyleMenu && (
-            <View style={styles.styleMenu}>
-              <Text style={styles.menuTitle}>Harita Stili</Text>
-              
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.styleScroll}>
-                <TouchableOpacity 
-                  style={[styles.styleCard, mapType === 'standard' && mapStyle === 'standard' && styles.styleCardActive]}
-                  onPress={() => {
-                    setMapType('standard');
-                    setMapStyle('standard');
-                    setShowStyleMenu(false);
-                  }}
-                >
-                  <View style={[styles.stylePreview, { backgroundColor: '#E8E4D9' }]} />
-                  <Text style={styles.styleLabel}>Standart</Text>
-                </TouchableOpacity>
-                
-                <TouchableOpacity 
-                  style={[styles.styleCard, mapStyle === 'dark' && styles.styleCardActive]}
-                  onPress={() => {
-                    setMapType('standard');
-                    setMapStyle('dark');
-                    setShowStyleMenu(false);
-                  }}
-                >
-                  <View style={[styles.stylePreview, { backgroundColor: '#242f3e' }]} />
-                  <Text style={styles.styleLabel}>Karanlık</Text>
-                </TouchableOpacity>
-                
-                <TouchableOpacity 
-                  style={[styles.styleCard, mapType === 'satellite' && styles.styleCardActive]}
-                  onPress={() => {
-                    setMapType('satellite');
-                    setMapStyle('standard');
-                    setShowStyleMenu(false);
-                  }}
-                >
-                  <View style={[styles.stylePreview, { backgroundColor: '#4A7C59' }]} />
-                  <Text style={styles.styleLabel}>Uydu</Text>
-                </TouchableOpacity>
-                
-                <TouchableOpacity 
-                  style={[styles.styleCard, mapType === 'terrain' && styles.styleCardActive]}
-                  onPress={() => {
-                    setMapType('terrain');
-                    setMapStyle('standard');
-                    setShowStyleMenu(false);
-                  }}
-                >
-                  <View style={[styles.stylePreview, { backgroundColor: '#C8B895' }]} />
-                  <Text style={styles.styleLabel}>Arazi</Text>
-                </TouchableOpacity>
-                
-                <TouchableOpacity 
-                  style={[styles.styleCard, mapStyle === 'minimal' && styles.styleCardActive]}
-                  onPress={() => {
-                    setMapType('standard');
-                    setMapStyle('minimal');
-                    setShowStyleMenu(false);
-                  }}
-                >
-                  <View style={[styles.stylePreview, { backgroundColor: '#f5f5f5' }]} />
-                  <Text style={styles.styleLabel}>Minimal</Text>
-                </TouchableOpacity>
-              </ScrollView>
-            </View>
-          )}
-
-          {/* Rota seçenekleri - modal kapatıldıktan sonra tekrar açmak için; Rota iptal */}
-          {routeStatsFromApi && routeStatsFromApi.length > 0 && !isNavigating && (
-            <View style={styles.routeOptionsPillWrap}>
-              <TouchableOpacity
-                style={[styles.routeOptionsPill, styles.routeOptionsPillSecondary]}
-                onPress={handleCancelRoute}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="close-circle-outline" size={20} color="#666" />
-                <Text style={styles.routeOptionsPillTextSecondary}>Rota iptal</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.routeOptionsPill}
-                onPress={() => setShowRouteSelection(true)}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="options-outline" size={20} color="#FFF" />
-                <Text style={styles.routeOptionsPillText}>
-                  Rota seçenekleri {routeStatsFromApi.length > 1 ? `(${routeStatsFromApi.length})` : ''}
-                </Text>
-              </TouchableOpacity>
             </View>
           )}
 
           {/* Harita Kontrolleri */}
+          {shouldShowPreRouteUI && (
           <View style={styles.mapControls}>
             {/* Konum Butonu */}
             <TouchableOpacity style={styles.controlButton} onPress={handleMyLocation}>
@@ -1229,34 +1395,23 @@ export default function MapScreen() {
             >
               <Ionicons name="remove" size={24} color="#333" />
             </TouchableOpacity>
-            
-            {/* Katman Menüsü */}
-            <TouchableOpacity 
-              style={[styles.controlButton, (layers.slopes || layers.traffic || layers.buildings3D) && styles.controlButtonActive]}
-              onPress={() => setShowLayersMenu(true)}
-            >
-              <Ionicons name="layers-outline" size={24} color={(layers.slopes || layers.traffic || layers.buildings3D) ? "#4ECDC4" : "#333"} />
-            </TouchableOpacity>
-            
-            {/* Stil Menüsü */}
-            <TouchableOpacity 
-              style={styles.controlButton}
-              onPress={() => setShowStyleMenu(!showStyleMenu)}
-            >
-              <Ionicons name="color-palette-outline" size={24} color="#333" />
-            </TouchableOpacity>
           </View>
+          )}
         </>
       )}
 
       {/* Modals */}
       <RouteSelectionModal
         visible={showRouteSelection}
-        onClose={() => setShowRouteSelection(false)}
+        onClose={() => {
+          setShowRouteSelection(false);
+          setProfileMapPoint(null);
+        }}
         onSelectRoute={handleRouteSelect}
         routes={routeStatsFromApi}
         startLocation={startAddress || 'Konumunuz'}
         endLocation={endAddress || 'Hedef'}
+        onProfilePointChange={setProfileMapPoint}
       />
 
       <NavigationView
@@ -1266,6 +1421,14 @@ export default function MapScreen() {
         userLocation={location}
         startPoint={startPoint}
         endPoint={endPoint}
+        onRerouteRequest={handleRerouteRequest}
+      />
+
+      <SessionSummaryScreen
+        visible={showSessionSummary}
+        summary={sessionSummaryData}
+        onClose={handleCloseSessionSummary}
+        onStartNewSession={handleStartNewSession}
       />
     </View>
   );
@@ -1508,45 +1671,148 @@ const styles = StyleSheet.create({
     bottom: 120,
     right: 20,
   },
-  routeOptionsPillWrap: {
+  floatingRouteContainer: {
     position: 'absolute',
     bottom: 128,
-    left: 20,
-    right: 20,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 10,
+    left: 16,
+    right: 16,
+    gap: 12,
   },
-  routeOptionsPill: {
+  floatingRouteCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
+    elevation: 8,
+    borderWidth: 1,
+    borderColor: '#F1F5F9',
+  },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  routeBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  routeBadgeText: {
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+  },
+  cardTimeDistance: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 6,
+  },
+  cardTime: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  cardDistance: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#64748B',
+    marginBottom: 2,
+  },
+  cardMetricsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 16,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  metricItem: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    backgroundColor: '#4ECDC4',
-    borderRadius: 24,
+    gap: 6,
+  },
+  metricIconWrap: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 8,
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  metricText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#475569',
+  },
+  metricDivider: {
+    width: 1,
+    height: 16,
+    backgroundColor: '#E2E8F0',
+  },
+  actionButtonsRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  cancelBtn: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
     elevation: 6,
-  },
-  routeOptionsPillSecondary: {
-    backgroundColor: '#FFF',
     borderWidth: 1,
-    borderColor: '#DDD',
+    borderColor: '#F1F5F9',
   },
-  routeOptionsPillText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#FFF',
+  primaryActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0F172A',
+    borderRadius: 28,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 8,
   },
-  routeOptionsPillTextSecondary: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#666',
+  primaryActionBtnText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    marginRight: 10,
+  },
+  badgeWrap: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#334155',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
   controlButton: {
     width: 48,
@@ -1563,6 +1829,37 @@ const styles = StyleSheet.create({
     elevation: 5,
   },
   // Küçültülmüş Kullanıcı Konumu Marker
+  profileMarkerOuter: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(21, 101, 192, 0.22)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileMarkerContainer: {
+    alignItems: 'center',
+  },
+  profileMarkerBadge: {
+    backgroundColor: '#1A1A2E',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+    marginBottom: 6,
+  },
+  profileMarkerText: {
+    color: '#FFF',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  profileMarkerInner: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#1565C0',
+    borderWidth: 2,
+    borderColor: '#FFF',
+  },
   userLocationContainer: {
     alignItems: 'center',
     justifyContent: 'center',
