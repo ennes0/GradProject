@@ -1,0 +1,6 @@
+# Büyük / yerel raster ve graf verileri (TIF, GPKG vb.) — repoya eklenmesin
+yeni tiff/
+ODOS-Backend/graphRelatedFiles/
+
+# Sunucuda saklanan kullanıcı medya dosyaları
+ODOS-Backend/odos-backend/data/

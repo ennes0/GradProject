@@ -1,0 +1,41 @@
+-- Kullanıcının kaydettiği yürüyüş oturumları (sunucu rotayı yeniden hesaplamaz; istemci anlık görüntüsü).
+CREATE TABLE IF NOT EXISTS saved_routes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(200) NOT NULL,
+    start_label VARCHAR(400),
+    end_label VARCHAR(400),
+    route_type VARCHAR(32),
+    difficulty VARCHAR(16),
+    completion_status VARCHAR(32) NOT NULL DEFAULT 'completed',
+    completion_ratio DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    planned_distance_m DOUBLE PRECISION,
+    traveled_distance_m DOUBLE PRECISION,
+    elapsed_seconds INTEGER NOT NULL DEFAULT 0,
+    avg_speed_kmh DOUBLE PRECISION,
+    pace_sec_per_km DOUBLE PRECISION,
+    calories_kcal INTEGER,
+    climb_m INTEGER,
+    reroute_count INTEGER NOT NULL DEFAULT 0,
+    max_off_route_distance_m DOUBLE PRECISION NOT NULL DEFAULT 0,
+    avg_slope_pct DOUBLE PRECISION,
+    max_slope_pct DOUBLE PRECISION,
+    elevation_gain_m DOUBLE PRECISION,
+    steps INTEGER,
+    mood VARCHAR(32),
+    weather_summary VARCHAR(120),
+    temperature_label VARCHAR(32),
+    notes TEXT,
+    image_url TEXT,
+    is_favorite BOOLEAN NOT NULL DEFAULT FALSE,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    route_polyline_json JSONB,
+    elevation_series_json JSONB,
+    session_extras_json JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_saved_routes_user_finished ON saved_routes (user_id, finished_at DESC);
+CREATE INDEX IF NOT EXISTS idx_saved_routes_user_favorite ON saved_routes (user_id, is_favorite) WHERE is_favorite = TRUE;
