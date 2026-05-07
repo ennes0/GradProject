@@ -25,7 +25,13 @@ import { useMapPreload } from '../../components/context/MapPreloadContext';
 import { useAppAlert } from '../../components/context/AppAlertContext';
 import { useAuth } from '../../components/context/AuthContext';
 import { useLanguage } from '../../components/context/LanguageContext';
-import { getRouteUrl, getRoutesUrl, getGooglePlacesAutocompleteUrl, getGooglePlaceDetailsUrl } from '../../config/api';
+import {
+  getRouteUrl,
+  getRoutesUrl,
+  getGooglePlacesAutocompleteUrl,
+  getGooglePlaceDetailsUrl,
+  getGoogleGeocodingUrl,
+} from '../../config/api';
 import { buildSaveRoutePayload } from '../../utils/savedRoutes';
 import { getMapProvider } from '../../constants/mapProvider';
 import { Colors } from '../../constants/Colors';
@@ -83,6 +89,14 @@ function chunkAvgAbsSlopePct(chunk) {
   if (!chunk || typeof chunk !== 'object') return 0;
   const v = chunk.avgAbsSlopePct ?? chunk.avg_abs_slope_pct;
   return Number(v) || 0;
+}
+
+function routeTypeToColor(type) {
+  const t = String(type || '').toLowerCase();
+  if (t === 'shortest') return Colors.routeShortest;
+  if (t === 'balanced') return Colors.routeBalanced || '#7DC3FF';
+  if (t === 'easiest') return '#43A047';
+  return Colors.primary;
 }
 
 function createPlacesSessionToken() {
@@ -254,6 +268,8 @@ export default function MapScreen({ route }) {
   const sessionSummaryRef = useRef(null);
   const [startAddress, setStartAddress] = useState('');
   const [endAddress, setEndAddress] = useState('');
+  const [startResolvedAddress, setStartResolvedAddress] = useState('');
+  const [endResolvedAddress, setEndResolvedAddress] = useState('');
   const [routeCoordinates, setRouteCoordinates] = useState([]);
   const [isLoadingRoute, setIsLoadingRoute] = useState(false);
   const [routeStatsFromApi, setRouteStatsFromApi] = useState(null); // ODOS API'den gelen rotalar (modal + harita)
@@ -270,6 +286,7 @@ export default function MapScreen({ route }) {
   const placesSessionTokenRef = useRef(null);
   const placesCacheRef = useRef(new Map());
   const placeDetailsCacheRef = useRef(new Map());
+  const reverseGeocodeCacheRef = useRef(new Map());
   const consumedPlannerPrefillRef = useRef(null);
   const consumedReplaySessionRef = useRef(null);
   
@@ -443,6 +460,77 @@ export default function MapScreen({ route }) {
     return resolved;
   };
 
+  const resolveAddressFromCoordinate = useCallback(async (coordinate, fallbackLabel = '') => {
+    if (!coordinate || !Number.isFinite(coordinate.latitude) || !Number.isFinite(coordinate.longitude)) {
+      return fallbackLabel || tx('Bilinmeyen Konum', 'Unknown location');
+    }
+
+    const cacheKey = `${coordinate.latitude.toFixed(5)},${coordinate.longitude.toFixed(5)}`;
+    const cached = reverseGeocodeCacheRef.current.get(cacheKey);
+    if (cached) return cached;
+
+    const normalizeGoogleGeocodeResult = (result) => {
+      if (!result || typeof result !== 'object') return null;
+      const components = Array.isArray(result.address_components) ? result.address_components : [];
+      const pick = (type) => components.find((c) => Array.isArray(c.types) && c.types.includes(type))?.long_name;
+      const streetNumber = pick('street_number');
+      const routeName = pick('route');
+      const neighborhood = pick('neighborhood') || pick('sublocality') || pick('sublocality_level_1');
+      const locality = pick('locality') || pick('administrative_area_level_2');
+
+      const line = [routeName, streetNumber].filter(Boolean).join(' ').trim();
+      return (
+        line ||
+        neighborhood ||
+        locality ||
+        (typeof result.formatted_address === 'string' ? result.formatted_address.split(',')[0]?.trim() : null) ||
+        null
+      );
+    };
+
+    try {
+      const rows = await Location.reverseGeocodeAsync({
+        latitude: coordinate.latitude,
+        longitude: coordinate.longitude,
+      });
+      const row = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+
+      const streetLine = [row?.street, row?.streetNumber].filter(Boolean).join(' ').trim();
+      const primary =
+        row?.name ||
+        streetLine ||
+        row?.district ||
+        row?.subregion ||
+        row?.city ||
+        row?.region ||
+        fallbackLabel ||
+        tx('Seçilen Konum', 'Selected Location');
+
+      const normalized = String(primary).trim();
+      reverseGeocodeCacheRef.current.set(cacheKey, normalized);
+      return normalized;
+    } catch {
+      try {
+        const response = await fetch(
+          getGoogleGeocodingUrl({
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
+          }),
+        );
+        const data = await response.json();
+        const first = Array.isArray(data?.results) && data.results.length > 0 ? data.results[0] : null;
+        const googleLabel = normalizeGoogleGeocodeResult(first);
+        if (googleLabel) {
+          reverseGeocodeCacheRef.current.set(cacheKey, googleLabel);
+          return googleLabel;
+        }
+      } catch {
+        // fallback below
+      }
+      return fallbackLabel || tx('Seçilen Konum', 'Selected Location');
+    }
+  }, [tx]);
+
   const fitRouteOnMap = async (origin, destination) => {
     if (!origin || !destination) return false;
 
@@ -471,9 +559,11 @@ export default function MapScreen({ route }) {
     const applyPrefill = async () => {
       if (prefill.startAddress) {
         setStartAddress(prefill.startAddress);
+        setStartResolvedAddress(prefill.startAddress);
       }
       if (prefill.endAddress) {
         setEndAddress(prefill.endAddress);
+        setEndResolvedAddress(prefill.endAddress);
       }
       if (prefill.startPoint && Number.isFinite(prefill.startPoint.latitude) && Number.isFinite(prefill.startPoint.longitude)) {
         setStartPoint(prefill.startPoint);
@@ -524,6 +614,8 @@ export default function MapScreen({ route }) {
 
     setStartAddress(replay.startAddress || '');
     setEndAddress(replay.endAddress || '');
+    setStartResolvedAddress(replay.startAddress || '');
+    setEndResolvedAddress(replay.endAddress || '');
     setStartPoint(start);
     setEndPoint(end);
     setRouteCoordinates(coordinates);
@@ -540,7 +632,7 @@ export default function MapScreen({ route }) {
       type: replay.routeType || 'balanced',
       label: replay.title || 'Kaydedilen Rota',
       coordinates,
-      color: Colors.primary,
+      color: routeTypeToColor(replay.routeType || 'balanced'),
       difficulty: replay.difficulty || 'medium',
       estimatedEffort: 'Medium',
       distance: replay.distanceLabel || '—',
@@ -677,11 +769,18 @@ export default function MapScreen({ route }) {
     const nextStart = activeSearchField === 'start' ? coordinate : startPoint;
     const nextEnd = activeSearchField === 'end' ? coordinate : endPoint;
     
+    const resolvedLabel = await resolveAddressFromCoordinate(
+      coordinate,
+      tx('Benim Konumum', 'My Location'),
+    );
+
     if (activeSearchField === 'start') {
-      setStartAddress('Benim Konumum');
+      setStartAddress(tx('Benim Konumum', 'My Location'));
+      setStartResolvedAddress(resolvedLabel);
       setStartPoint(coordinate);
     } else {
-      setEndAddress('Benim Konumum');
+      setEndAddress(tx('Benim Konumum', 'My Location'));
+      setEndResolvedAddress(resolvedLabel);
       setEndPoint(coordinate);
     }
 
@@ -722,9 +821,11 @@ export default function MapScreen({ route }) {
     
     if (activeSearchField === 'start') {
       setStartAddress(location.name);
+      setStartResolvedAddress(location.name || location.address || '');
       setStartPoint(coordinate);
     } else {
       setEndAddress(location.name);
+      setEndResolvedAddress(location.name || location.address || '');
       setEndPoint(coordinate);
     }
 
@@ -787,12 +888,32 @@ export default function MapScreen({ route }) {
     if (!startPoint) {
       setStartPoint(coordinate);
       setRouteCoordinates([]);
+      const startLabel = await resolveAddressFromCoordinate(
+        coordinate,
+        tx('Başlangıç Noktası', 'Start Point'),
+      );
+      setStartAddress(tx('Benim Konumum', 'My Location'));
+      setStartResolvedAddress(startLabel);
     } else if (!endPoint) {
       setEndPoint(coordinate);
+      const endLabel = await resolveAddressFromCoordinate(
+        coordinate,
+        tx('Seçilen Hedef', 'Selected Destination'),
+      );
+      setEndAddress(tx('Hedef', 'Destination'));
+      setEndResolvedAddress(endLabel);
       await fitRouteOnMap(startPoint, coordinate);
     } else {
       setStartPoint(coordinate);
+      const startLabel = await resolveAddressFromCoordinate(
+        coordinate,
+        tx('Başlangıç Noktası', 'Start Point'),
+      );
+      setStartAddress(tx('Benim Konumum', 'My Location'));
+      setStartResolvedAddress(startLabel);
       setEndPoint(null);
+      setEndAddress('');
+      setEndResolvedAddress('');
       setSelectedRoute(null);
       setRouteCoordinates([]);
       setRouteStatsFromApi(null);
@@ -804,6 +925,7 @@ export default function MapScreen({ route }) {
   const handleCancelRoute = () => {
     setEndPoint(null);
     setEndAddress('');
+    setEndResolvedAddress('');
     setSelectedRoute(null);
     setRouteCoordinates([]);
     setRouteStatsFromApi(null);
@@ -841,6 +963,7 @@ export default function MapScreen({ route }) {
     setSelectedRoute(null);
     setEndPoint(null);
     setEndAddress('');
+    setEndResolvedAddress('');
     setRouteCoordinates([]);
     setRouteStatsFromApi(null);
     setSelectedRouteIndex(0);
@@ -848,8 +971,9 @@ export default function MapScreen({ route }) {
     if (location && Number.isFinite(location.latitude) && Number.isFinite(location.longitude)) {
       setStartPoint({ latitude: location.latitude, longitude: location.longitude });
       setStartAddress('Benim Konumum');
+      setStartResolvedAddress('');
     }
-  }, [location]);
+  }, [location, tx]);
 
   const handleCloseNavigation = (payload) => {
     setIsNavigating(false);
@@ -933,7 +1057,11 @@ export default function MapScreen({ route }) {
   };
 
   const mapApiRoutesToCards = (apiRoutes) => {
-    const routeColors = { shortest: Colors.routeShortest, balanced: '#00897B', easiest: '#43A047' };
+    const routeColors = {
+      shortest: routeTypeToColor('shortest'),
+      balanced: routeTypeToColor('balanced'),
+      easiest: routeTypeToColor('easiest'),
+    };
     const routeIcons = { shortest: 'map-outline', balanced: 'fitness', easiest: 'leaf' };
     const descriptions = {
       shortest: 'Toplam yol uzunluğu en kısa (graf mesafesi, A*).',
@@ -968,7 +1096,7 @@ export default function MapScreen({ route }) {
         maxSlopePct: r.maxSlopePct != null && Number.isFinite(r.maxSlopePct) ? r.maxSlopePct : null,
         avgSlopePct: r.avgSlopePct != null && Number.isFinite(r.avgSlopePct) ? r.avgSlopePct : null,
         segments: r.segments || null,
-        color: routeColors[r.type] || '#4ECDC4',
+        color: routeColors[r.type] || Colors.primary,
         icon: routeIcons[r.type] || 'fitness',
         elevationData,
         elevationProfile: r.elevationProfile || null,
@@ -1271,7 +1399,7 @@ export default function MapScreen({ route }) {
                   const coords = route.coordinates || [];
                   const isSelected = index === selectedRouteIndex;
                   if (coords.length === 0) return null;
-                  const routeColor = route.color || '#00897B';
+                  const routeColor = route.color || routeTypeToColor(route.type);
                   return (
                     <React.Fragment key={`route-opt-${route.id}-${index}`}>
                       <Polyline
@@ -1441,6 +1569,7 @@ export default function MapScreen({ route }) {
                     style={styles.clearButton}
                     onPress={() => {
                       setStartAddress('');
+                      setStartResolvedAddress('');
                       setStartPoint(null);
                       setRouteCoordinates([]);
                       setRouteStatsFromApi(null);
@@ -1477,6 +1606,7 @@ export default function MapScreen({ route }) {
                     style={styles.clearButton}
                     onPress={() => {
                       setEndAddress('');
+                      setEndResolvedAddress('');
                       setEndPoint(null);
                       setRouteCoordinates([]);
                       setSelectedRoute(null);
@@ -1495,10 +1625,13 @@ export default function MapScreen({ route }) {
                 onPress={() => {
                   const tempAddress = startAddress;
                   const tempPoint = startPoint;
+                  const tempResolvedAddress = startResolvedAddress;
                   setStartAddress(endAddress);
                   setStartPoint(endPoint);
+                  setStartResolvedAddress(endResolvedAddress);
                   setEndAddress(tempAddress);
                   setEndPoint(tempPoint);
+                  setEndResolvedAddress(tempResolvedAddress);
                 }}
               >
                 <Ionicons name="swap-vertical" size={18} color="#666" />
@@ -1639,21 +1772,19 @@ export default function MapScreen({ route }) {
                     </View>
 
                     <View style={styles.cardMetricsRow}>
-                      <View style={styles.metricItem}>
+                      <View style={styles.metricItemFull}>
                         <View style={styles.metricIconWrap}>
                           <Ionicons name="trending-up" size={14} color="#64748B" />
                         </View>
                         <Text style={styles.metricText}>{r.avgSlope || '%0'}</Text>
                       </View>
-                      <View style={styles.metricDivider} />
-                      <View style={styles.metricItem}>
+                      <View style={styles.metricItemFull}>
                         <View style={styles.metricIconWrap}>
                           <Ionicons name="flame" size={14} color="#F59E0B" />
                         </View>
                         <Text style={styles.metricText}>{r.calories || '0 kcal'}</Text>
                       </View>
-                      <View style={styles.metricDivider} />
-                      <View style={styles.metricItem}>
+                      <View style={styles.metricItemFull}>
                         <View style={styles.metricIconWrap}>
                           <MaterialCommunityIcons name="stairs-up" size={15} color="#64748B" />
                         </View>
@@ -1754,8 +1885,8 @@ export default function MapScreen({ route }) {
         startPoint={startPoint}
         endPoint={endPoint}
         onRerouteRequest={handleRerouteRequest}
-        startLabel={startAddress || ''}
-        endLabel={endAddress || ''}
+        startLabel={startResolvedAddress || startAddress || ''}
+        endLabel={endResolvedAddress || endAddress || ''}
       />
 
       <SessionSummaryScreen
@@ -2046,7 +2177,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 128,
     left: 16,
-    right: 16,
+    right: 88,
     gap: 12,
   },
   floatingRouteCard: {
@@ -2098,18 +2229,26 @@ const styles = StyleSheet.create({
   },
   cardMetricsRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'stretch',
+    justifyContent: 'flex-start',
+    flexWrap: 'wrap',
     backgroundColor: '#F8FAFC',
     borderRadius: 16,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    gap: 6,
   },
-  metricItem: {
-    flex: 1,
+  metricItemFull: {
+    width: '100%',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
+    gap: 5,
+    paddingVertical: 7,
+    paddingHorizontal: 4,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    minHeight: 38,
   },
   metricIconWrap: {
     width: 24,
@@ -2125,9 +2264,10 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   metricText: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '600',
     color: '#475569',
+    flexShrink: 1,
   },
   metricDivider: {
     width: 1,

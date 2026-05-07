@@ -454,13 +454,23 @@ export default function NavigationView({
     const completionRatio = plannedDistanceM > 0
       ? Math.max(0, Math.min(1, boundedTraveledM / plannedDistanceM))
       : 0;
-    const elapsedSeconds = Math.max(1, elapsedTime);
-    const avgSpeedKmh = boundedTraveledM > 0 ? ((boundedTraveledM / elapsedSeconds) * 3.6) : 0;
-    const paceSecPerKm = boundedTraveledM > 0 ? elapsedSeconds / (boundedTraveledM / 1000) : 0;
+    const elapsedSeconds = Math.max(0, elapsedTime);
+    const avgSpeedKmh = (boundedTraveledM > 0 && elapsedSeconds > 0)
+      ? ((boundedTraveledM / elapsedSeconds) * 3.6)
+      : 0;
+    const paceSecPerKm = (boundedTraveledM > 0 && elapsedSeconds > 0)
+      ? elapsedSeconds / (boundedTraveledM / 1000)
+      : 0;
     const calorieFromRoute = parseNumericValue(route?.calories);
-    const calculatedCalories = Math.max(0, Math.round((elapsedSeconds / 60) * 4.5));
-    const calories = calorieFromRoute != null ? Math.round(calorieFromRoute) : calculatedCalories;
-    const climbM = Math.max(0, Math.round(parseNumericValue(route?.totalClimb) || 0));
+    const plannedCalories = calorieFromRoute != null ? Math.max(0, Math.round(calorieFromRoute)) : null;
+    const calculatedCalories = boundedTraveledM > 0
+      ? Math.max(0, Math.round((boundedTraveledM / 1000) * 52))
+      : 0;
+    const calories = plannedCalories != null
+      ? Math.max(0, Math.round(plannedCalories * completionRatio))
+      : calculatedCalories;
+    const plannedClimbM = Math.max(0, Math.round(parseNumericValue(route?.totalClimb) || 0));
+    const climbM = Math.max(0, Math.round(plannedClimbM * completionRatio));
 
     const coords = Array.isArray(route?.coordinates) ? route.coordinates : [];
     return {

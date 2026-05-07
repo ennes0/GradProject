@@ -55,6 +55,7 @@ export default function RouteSelectionModal({
   const dragY = useRef(new Animated.Value(0)).current;
   const isClosingRef = useRef(false);
   const [activeChartByRouteId, setActiveChartByRouteId] = useState({});
+  const [chartWidthByRouteId, setChartWidthByRouteId] = useState({});
 
   // Pan Responder for drag to dismiss
   const panResponder = useRef(
@@ -105,6 +106,7 @@ export default function RouteSelectionModal({
       ]).start();
     } else {
       setActiveChartByRouteId({});
+      setChartWidthByRouteId({});
       onProfilePointChange?.(null);
     }
   }, [visible, onProfilePointChange]);
@@ -158,7 +160,7 @@ export default function RouteSelectionModal({
       duration: '18 dk',
       calories: '185 kcal',
       avgSlope: '~5% ort.',
-      color: Colors.primary,
+      color: Colors.routeBalanced || '#7DC3FF',
       icon: 'fitness',
       elevationData: [2, 5, 10, 15, 20, 28, 35, 40, 43, 45],
       recommended: true,
@@ -181,21 +183,39 @@ export default function RouteSelectionModal({
 
   const routeData = (routes && Array.isArray(routes) && routes.length > 0) ? routes : defaultRoutes;
 
+  const getRouteThemeColor = (route) => {
+    const type = String(route?.type || '').toLowerCase();
+    if (type === 'shortest') return Colors.routeShortest;
+    if (type === 'balanced') return Colors.routeBalanced || '#7DC3FF';
+    if (type === 'easiest') return '#4CAF50';
+    return route?.color || Colors.primary;
+  };
+
+  const getLocalizedRouteLabel = (route) => {
+    const type = String(route?.type || '').toLowerCase();
+    if (type === 'shortest') return tx('En Kısa Mesafe', 'Shortest Distance');
+    if (type === 'balanced') return tx('Dengeli', 'Balanced');
+    if (type === 'easiest') return tx('En Kolay', 'Easiest');
+    return route?.label || '';
+  };
+
   const renderElevationChart = (route, data, color, routeId) => {
     const safeData = (data && Array.isArray(data) && data.length >= 2) ? data : [0, 10];
-    const chartWidth = SCREEN_WIDTH - 100;
-    const chartHeight = 50;
-    const padding = 4;
-    const leftLabelWidth = 32;
-    const graphLeft = leftLabelWidth + padding;
-    const graphWidth = chartWidth - graphLeft - padding;
+    const chartWidth = Math.max(220, Number(chartWidthByRouteId[routeId]) || (SCREEN_WIDTH - 96));
+    const chartHeight = 54;
+    const topPadding = 4;
+    const bottomPadding = 6;
+    const rightPadding = 6;
+    const leftLabelWidth = 58;
+    const graphLeft = leftLabelWidth + 6;
+    const graphWidth = chartWidth - graphLeft - rightPadding;
     
     const maxValue = Math.max(...safeData);
     const minValue = Math.min(...safeData);
     const range = maxValue - minValue || 1;
     
     const valueToY = (value) =>
-      chartHeight - padding - ((value - minValue) / range) * (chartHeight - padding * 2);
+      chartHeight - bottomPadding - ((value - minValue) / range) * (chartHeight - topPadding - bottomPadding);
     
     const points = safeData.map((value, index) => {
       const x = graphLeft + (index / (safeData.length - 1 || 1)) * graphWidth;
@@ -255,7 +275,7 @@ export default function RouteSelectionModal({
           onResponderRelease={() => {}}
           onResponderTerminate={() => {}}
         >
-        <Svg width={chartWidth} height={chartHeight + 16}>
+        <Svg width={chartWidth} height={chartHeight + 18}>
           <Defs>
             <LinearGradient id={`gradient-${routeId}`} x1="0%" y1="0%" x2="0%" y2="100%">
               <Stop offset="0%" stopColor={color} stopOpacity="0.4" />
@@ -264,9 +284,9 @@ export default function RouteSelectionModal({
           </Defs>
           
           {/* Grid lines */}
-          <Line x1={graphLeft} y1={chartHeight * 0.25} x2={chartWidth - padding} y2={chartHeight * 0.25} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
-          <Line x1={graphLeft} y1={chartHeight * 0.5} x2={chartWidth - padding} y2={chartHeight * 0.5} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
-          <Line x1={graphLeft} y1={chartHeight * 0.75} x2={chartWidth - padding} y2={chartHeight * 0.75} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
+          <Line x1={graphLeft} y1={valueToY(minValue + (range * 1) / 4)} x2={chartWidth - rightPadding} y2={valueToY(minValue + (range * 1) / 4)} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
+          <Line x1={graphLeft} y1={valueToY(minValue + (range * 2) / 4)} x2={chartWidth - rightPadding} y2={valueToY(minValue + (range * 2) / 4)} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
+          <Line x1={graphLeft} y1={valueToY(minValue + (range * 3) / 4)} x2={chartWidth - rightPadding} y2={valueToY(minValue + (range * 3) / 4)} stroke="#E5E5E5" strokeWidth="1" strokeDasharray="4,4" />
           
           <Path d={areaPath} fill={`url(#gradient-${routeId})`} />
           <Path d={pathD} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -274,9 +294,9 @@ export default function RouteSelectionModal({
             <>
               <Line
                 x1={activePoint.x}
-                y1={padding}
+                y1={topPadding}
                 x2={activePoint.x}
-                y2={chartHeight - padding}
+                y2={chartHeight - bottomPadding}
                 stroke={color}
                 strokeWidth="1.5"
                 strokeDasharray="3,2"
@@ -294,14 +314,14 @@ export default function RouteSelectionModal({
           
           {/* Y ekseni: yükselti değerleri (m) */}
           {yLabels.map(({ value, y }, i) => (
-            <SvgText key={`y-${i}-${value}`} x={leftLabelWidth - 4} y={y + 3} fontSize="9" fill="#888" textAnchor="end">
+            <SvgText key={`y-${i}-${value}`} x={leftLabelWidth - 8} y={y + 3} fontSize="8" fill="#888" textAnchor="end">
               {value}m
             </SvgText>
           ))}
           
           {/* X ekseni: sadece başlangıç/bitiş (sayı yok) */}
           <SvgText x={graphLeft} y={chartHeight + 12} fontSize="9" fill="#AAA" textAnchor="start">{tx('Başlangıç', 'Start')}</SvgText>
-          <SvgText x={chartWidth - padding} y={chartHeight + 12} fontSize="9" fill="#AAA" textAnchor="end">{tx('Bitiş', 'Finish')}</SvgText>
+          <SvgText x={chartWidth - rightPadding} y={chartHeight + 12} fontSize="9" fill="#AAA" textAnchor="end">{tx('Bitiş', 'Finish')}</SvgText>
         </Svg>
         </View>
       </View>
@@ -356,6 +376,9 @@ export default function RouteSelectionModal({
           contentContainerStyle={styles.routesContent}
         >
           {routeData.map((route) => (
+            (() => {
+              const routeColor = getRouteThemeColor(route);
+              return (
             <TouchableOpacity
               key={route.id}
               style={[
@@ -373,12 +396,12 @@ export default function RouteSelectionModal({
               )}
               
               <View style={styles.routeHeader}>
-                <View style={[styles.routeIconBg, { backgroundColor: route.color + '15' }]}>
-                  <Ionicons name={route.icon} size={22} color={route.color} />
+                <View style={[styles.routeIconBg, { backgroundColor: routeColor + '15' }]}>
+                  <Ionicons name={route.icon} size={22} color={routeColor} />
                 </View>
                 <View style={styles.routeInfo}>
-                  <Text style={[styles.routeLabel, { color: route.color }]}>
-                    {route.label}
+                  <Text style={[styles.routeLabel, { color: routeColor }]}>
+                    {getLocalizedRouteLabel(route)}
                   </Text>
                   <Text style={styles.routeDescription} numberOfLines={2}>
                     {route.description}
@@ -414,15 +437,25 @@ export default function RouteSelectionModal({
                     <Text style={styles.slopeText}>{tx('Ort. eğim', 'Avg. slope')}: {route.avgSlope}</Text>
                   ) : null}
                 </View>
-                {renderElevationChart(route, route.elevationData ?? [0, 10], route.color, route.id)}
+                <View
+                  onLayout={(evt) => {
+                    const width = Math.round(evt?.nativeEvent?.layout?.width || 0);
+                    if (!width) return;
+                    setChartWidthByRouteId((prev) => (prev[route.id] === width ? prev : { ...prev, [route.id]: width }));
+                  }}
+                >
+                  {renderElevationChart(route, route.elevationData ?? [0, 10], routeColor, route.id)}
+                </View>
               </View>
 
               {/* Select Button */}
-              <View style={[styles.selectButton, { backgroundColor: route.color }]}>
+              <View style={[styles.selectButton, { backgroundColor: routeColor }]}>
                 <Ionicons name="arrow-forward" size={18} color="#FFF" />
                 <Text style={styles.selectButtonText}>{tx('Bu Rotayı Seç', 'Choose This Route')}</Text>
               </View>
             </TouchableOpacity>
+              );
+            })()
           ))}
           
           <View style={{ height: 40 }} />

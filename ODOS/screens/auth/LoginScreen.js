@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -62,52 +63,58 @@ export default function LoginScreen({ navigation }) {
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <KeyboardAvoidingView
         style={styles.flex}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
-        <View style={styles.content}>
-          <View style={styles.logoWrap}>
-            <View style={styles.logoCircle}>
-              <Ionicons name="map" size={34} color="#FFFFFF" />
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={styles.scrollContent}
+        >
+          <View style={styles.content}>
+            <View style={styles.logoWrap}>
+              <View style={styles.logoCircle}>
+                <Ionicons name="map" size={34} color="#FFFFFF" />
+              </View>
+              <Text style={styles.title}>{t('auth.login.title')}</Text>
+              <Text style={styles.subtitle}>{t('auth.login.subtitle')}</Text>
             </View>
-            <Text style={styles.title}>{t('auth.login.title')}</Text>
-            <Text style={styles.subtitle}>{t('auth.login.subtitle')}</Text>
-          </View>
 
-          <View style={styles.card}>
-            <Text style={styles.label}>{t('auth.login.identifierLabel')}</Text>
-            <TextInput
-              value={identifier}
-              onChangeText={setIdentifier}
-              style={styles.input}
-              autoCapitalize="none"
-              placeholder={t('auth.login.identifierPlaceholder')}
-              placeholderTextColor="#94A3B8"
-            />
-
-            <Text style={styles.label}>{t('auth.login.passwordLabel')}</Text>
-            <View style={styles.passwordWrap}>
+            <View style={styles.card}>
+              <Text style={styles.label}>{t('auth.login.identifierLabel')}</Text>
               <TextInput
-                value={password}
-                onChangeText={setPassword}
-                style={[styles.input, styles.passwordInput]}
-                secureTextEntry={!showPassword}
-                placeholder="••••••••"
+                value={identifier}
+                onChangeText={setIdentifier}
+                style={styles.input}
+                autoCapitalize="none"
+                placeholder={t('auth.login.identifierPlaceholder')}
                 placeholderTextColor="#94A3B8"
               />
-              <TouchableOpacity style={styles.passwordToggle} onPress={() => setShowPassword((prev) => !prev)} activeOpacity={0.7}>
-                <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color="#64748B" />
+
+              <Text style={styles.label}>{t('auth.login.passwordLabel')}</Text>
+              <View style={styles.passwordWrap}>
+                <TextInput
+                  value={password}
+                  onChangeText={setPassword}
+                  style={[styles.input, styles.passwordInput]}
+                  secureTextEntry={!showPassword}
+                  placeholder="••••••••"
+                  placeholderTextColor="#94A3B8"
+                />
+                <TouchableOpacity style={styles.passwordToggle} onPress={() => setShowPassword((prev) => !prev)} activeOpacity={0.7}>
+                  <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color="#64748B" />
+                </TouchableOpacity>
+              </View>
+
+              <TouchableOpacity style={styles.primaryButton} onPress={handleLogin} disabled={loading}>
+                {loading ? <ActivityIndicator color="#FFF" /> : <Text style={styles.primaryButtonText}>{t('auth.login.button')}</Text>}
+              </TouchableOpacity>
+
+              <TouchableOpacity onPress={() => navigation.navigate('Register')} style={styles.secondaryButton}>
+                <Text style={styles.secondaryButtonText}>{t('auth.login.noAccount')}</Text>
               </TouchableOpacity>
             </View>
-
-            <TouchableOpacity style={styles.primaryButton} onPress={handleLogin} disabled={loading}>
-              {loading ? <ActivityIndicator color="#FFF" /> : <Text style={styles.primaryButtonText}>{t('auth.login.button')}</Text>}
-            </TouchableOpacity>
-
-            <TouchableOpacity onPress={() => navigation.navigate('Register')} style={styles.secondaryButton}>
-              <Text style={styles.secondaryButtonText}>{t('auth.login.noAccount')}</Text>
-            </TouchableOpacity>
           </View>
-        </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -116,6 +123,7 @@ export default function LoginScreen({ navigation }) {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#F8FAFC' },
   flex: { flex: 1 },
+  scrollContent: { flexGrow: 1, paddingVertical: 24 },
   content: { flex: 1, paddingHorizontal: 24, justifyContent: 'center' },
   logoWrap: { alignItems: 'center', marginBottom: 32 },
   logoCircle: {

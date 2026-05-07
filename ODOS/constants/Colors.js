@@ -8,6 +8,7 @@ export const Colors = {
   /** En Kısa rota çizgisi / teması */
   routeShortest: '#FF3636',
   routeShortestDeep: '#D92A2A',
+  routeBalanced: '#7DC3FF',
   
   // Eski yeşil tema (yürüyüş rotaları için)
   nature: '#2E7D32',

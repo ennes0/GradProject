@@ -327,8 +327,8 @@ export default function SessionSummaryScreen({
                 <View style={styles.metricIconWrap}>
                   <Ionicons name="analytics" size={16} color={summaryAccent.chartLine} />
                 </View>
-                <Text style={styles.metricLabel}>{tx('Toplam Mesafe', 'Total Distance')}</Text>
-                <Text style={styles.metricValue}>{formatDistance(plannedDistanceM)}</Text>
+                <Text style={styles.metricLabel}>{tx('Yürünülen Mesafe', 'Distance Walked')}</Text>
+                <Text style={styles.metricValue}>{formatDistance(traveledDistanceM)}</Text>
               </View>
               <View style={styles.metricItem}>
                 <View style={styles.metricIconWrap}>

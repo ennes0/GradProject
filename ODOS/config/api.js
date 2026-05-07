@@ -72,6 +72,17 @@ export const getGooglePlaceDetailsUrl = ({ placeId, sessionToken }) => {
   return `https://maps.googleapis.com/maps/api/place/details/json?${params.toString()}`;
 };
 
+export const getGoogleGeocodingUrl = ({ latitude, longitude }) => {
+  const params = new URLSearchParams({
+    latlng: `${latitude},${longitude}`,
+    key: GOOGLE_PLACES_API_KEY,
+    language: 'tr',
+    region: 'tr',
+    result_type: 'street_address|route|neighborhood|sublocality|locality|administrative_area_level_2',
+  });
+  return `https://maps.googleapis.com/maps/api/geocode/json?${params.toString()}`;
+};
+
 export const getRegisterUrl = () => `${getApiBase()}/api/auth/register`;
 export const getLoginUrl = () => `${getApiBase()}/api/auth/login`;
 export const getRefreshUrl = () => `${getApiBase()}/api/auth/refresh`;

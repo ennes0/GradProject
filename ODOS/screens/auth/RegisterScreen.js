@@ -92,8 +92,12 @@ export default function RegisterScreen({ navigation }) {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <ScrollView
+          contentContainerStyle={styles.content}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
           <Text style={styles.title}>{t('auth.register.title')}</Text>
           <Text style={styles.subtitle}>{t('auth.register.subtitle')}</Text>
 
@@ -156,7 +160,7 @@ export default function RegisterScreen({ navigation }) {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#F8FAFC' },
   flex: { flex: 1 },
-  content: { paddingHorizontal: 24, paddingTop: 36, paddingBottom: 36 },
+  content: { paddingHorizontal: 24, paddingTop: 36, paddingBottom: 96 },
   title: { fontSize: 30, fontWeight: '900', color: '#0F172A', letterSpacing: -0.6 },
   subtitle: { marginTop: 10, marginBottom: 28, fontSize: 15, lineHeight: 22, color: '#64748B' },
   card: { backgroundColor: '#FFF', borderRadius: 24, padding: 20, borderWidth: 1, borderColor: '#EEF2F6' },

@@ -524,7 +524,13 @@ export default function CommunityScreen() {
                   disabled={pendingFollowIds.includes(user.id)}
                   activeOpacity={0.8}
                 >
-                  <Text style={[styles.userCardFollowBtnText, user.following && styles.userCardFollowBtnTextActive]}>
+                  <Text
+                    style={[
+                      styles.userCardFollowBtnText,
+                      user.following && styles.userCardFollowBtnTextActive,
+                      user.requested && styles.userCardFollowBtnTextRequested,
+                    ]}
+                  >
                     {pendingFollowIds.includes(user.id)
                       ? tx('...', '...')
                       : user.following
@@ -915,6 +921,9 @@ const styles = StyleSheet.create({
   },
   userCardFollowBtnTextActive: {
     color: '#334155',
+  },
+  userCardFollowBtnTextRequested: {
+    color: '#B45309',
   },
   userMainPress: {
     flex: 1,

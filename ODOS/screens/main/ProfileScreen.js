@@ -15,10 +15,12 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../components/context/AuthContext';
 import { useLanguage } from '../../components/context/LanguageContext';
+import { useAppAlert } from '../../components/context/AppAlertContext';
 import { Colors } from '../../constants/Colors';
 import { resolveUserMediaUrl } from '../../config/api';
-import { mapSavedRouteListItemToCard } from '../../utils/savedRoutes';
+import { mapSavedRouteListItemToCard, mergeSavedRouteDetailIntoCard } from '../../utils/savedRoutes';
 import UserListModal from '../../components/ui/UserListModal';
+import RouteDetailsModal from '../../components/ui/RouteDetailsModal';
 
 const DEFAULT_PROFILE_IMAGE = 'https://www.gravatar.com/avatar/?d=mp&s=200';
 const DEFAULT_BANNER_IMAGE = 'https://images.unsplash.com/photo-1605224095400-f925b422a578?auto=format&fit=crop&q=80&w=800';
@@ -26,10 +28,12 @@ const DEFAULT_BANNER_IMAGE = 'https://images.unsplash.com/photo-1605224095400-f9
 export default function ProfileScreen() {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
+  const { showAlert } = useAppAlert();
   const {
     user,
     isAuthenticated,
     fetchSavedRoutes,
+    fetchSavedRouteById,
     fetchPublicUserProfile,
     fetchUserFollowers,
     fetchUserFollowing,
@@ -43,6 +47,10 @@ export default function ProfileScreen() {
   const [listModal, setListModal] = useState(null);
   const [listUsers, setListUsers] = useState([]);
   const [listLoading, setListLoading] = useState(false);
+  const [showRouteDetails, setShowRouteDetails] = useState(false);
+  const [selectedRoute, setSelectedRoute] = useState(null);
+  const [routeDetailMerge, setRouteDetailMerge] = useState(null);
+  const [routeDetailLoading, setRouteDetailLoading] = useState(false);
 
   const loadSavedRoutes = useCallback(async () => {
     if (!isAuthenticated) {
@@ -93,6 +101,11 @@ export default function ProfileScreen() {
     return routeCards;
   }, [activeTab, routeCards]);
 
+  const displayRouteForModal = useMemo(() => {
+    if (!selectedRoute) return null;
+    return { ...selectedRoute, ...routeDetailMerge };
+  }, [selectedRoute, routeDetailMerge]);
+
   // Custom tab bar absolute konumda çizildiği için içerikte güvenli alt boşluk bırak.
   const scrollBottomPadding = 120 + insets.bottom;
 
@@ -126,6 +139,38 @@ export default function ProfileScreen() {
     if (!selected?.id) return;
     navigation.navigate('PublicProfile', { userId: selected.id });
   }, [navigation]);
+
+  const openRouteDetails = useCallback((route) => {
+    setSelectedRoute(route);
+    setRouteDetailMerge(null);
+    setShowRouteDetails(true);
+    if (!route?.serverId) {
+      setRouteDetailLoading(false);
+      return;
+    }
+    setRouteDetailLoading(true);
+    void (async () => {
+      try {
+        const detail = await fetchSavedRouteById(route.serverId);
+        setRouteDetailMerge(mergeSavedRouteDetailIntoCard(route, detail));
+      } catch (e) {
+        showAlert({
+          title: tx('Detay', 'Detail'),
+          message: e?.message || tx('Rota detayı alınamadı; liste bilgileri gösteriliyor.', 'Route details could not be loaded; showing list data.'),
+          type: 'warning',
+        });
+      } finally {
+        setRouteDetailLoading(false);
+      }
+    })();
+  }, [fetchSavedRouteById, showAlert, tx]);
+
+  const closeRouteDetails = useCallback(() => {
+    setShowRouteDetails(false);
+    setSelectedRoute(null);
+    setRouteDetailMerge(null);
+    setRouteDetailLoading(false);
+  }, []);
 
   return (
     <SafeAreaView style={styles.container} edges={[]}>
@@ -233,7 +278,12 @@ export default function ProfileScreen() {
               ) : listRows.length > 0 ? (
                 <View style={styles.routeList}>
                   {listRows.map((route) => (
-                    <TouchableOpacity key={route.id} style={styles.routeCard} activeOpacity={0.9}>
+                    <TouchableOpacity
+                      key={route.id}
+                      style={styles.routeCard}
+                      activeOpacity={0.9}
+                      onPress={() => openRouteDetails(route)}
+                    >
                       <View style={styles.routeTopRow}>
                         <View style={styles.routeTitleWrap}>
                           <Text style={styles.routeName} numberOfLines={1}>{route.name}</Text>
@@ -347,6 +397,12 @@ export default function ProfileScreen() {
         users={listUsers}
         onClose={() => setListModal(null)}
         onSelectUser={handleSelectUser}
+      />
+      <RouteDetailsModal
+        visible={showRouteDetails}
+        onClose={closeRouteDetails}
+        route={displayRouteForModal}
+        detailLoading={routeDetailLoading}
       />
     </SafeAreaView>
   );
