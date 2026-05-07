@@ -1,0 +1,30 @@
+services:
+  odos-backend:
+    image: mberkay54/odos-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: odos-backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      JAVA_TOOL_OPTIONS: -Xms512m -Xmx2800m -XX:+UseG1GC -XX:+UseStringDeduplication
+      ODOS_DB_URL: jdbc:postgresql://dpg-d7ub93j7uimc739jl6hg-a.frankfurt-postgres.render.com:5432/odosdb
+      ODOS_DB_USERNAME: odosdb_user
+      ODOS_DB_PASSWORD: cvbVIotcB5Vtfg4Fw2AivXwrevfu8Hjn
+      ODOS_DB_SSL: false
+      ODOS_DB_SSLMODE: disable
+      ODOS_GRAPH_LOAD_EDGE_GEOMETRY: false
+      ODOS_JWT_SECRET: D9uinr79b/oFqTlSx80CiiIETPCAYh/w15Vy1AhtTmK/U1G/vQF3kioole+T5gK8N0aKyPQ/i7dJrcaQmJBLrQ==
+      ODOS_JWT_ACCESS_MINUTES: 30
+      ODOS_JWT_REFRESH_DAYS: 14
+      ODOS_CORS_ALLOWED_ORIGINS: "*"
+      ODOS_USER_MEDIA_ROOT: /app/data/user-media
+    volumes:
+      - odos-user-media:/app/data/user-media
+
+volumes:
+  odos-postgres-data:
+  odos-user-media:

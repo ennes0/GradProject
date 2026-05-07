@@ -115,8 +115,8 @@ public class RouteService {
         Double endElevM = null;
         InMemoryGraph.NodeRecord firstNode = graph.getNodes().get(result.path.get(0));
         InMemoryGraph.NodeRecord lastNode = graph.getNodes().get(result.path.get(result.path.size() - 1));
-        if (firstNode != null) startElevM = firstNode.rakim();
-        if (lastNode != null) endElevM = lastNode.rakim();
+        if (firstNode != null) startElevM = (double) firstNode.rakim();
+        if (lastNode != null) endElevM = (double) lastNode.rakim();
 
         return RouteResponse.ok(
             coordinates, segM.segments(), totalLength / 1000.0, durationMin, totalClimb, totalDescent, result.totalCost(),
@@ -178,8 +178,8 @@ public class RouteService {
         List<RouteResponse.ElevationProfilePoint> elevationProfile = elev.profile();
         InMemoryGraph.NodeRecord first = graph.getNodes().get(path.get(0));
         InMemoryGraph.NodeRecord last = graph.getNodes().get(path.get(path.size() - 1));
-        Double startElevM = first != null ? first.rakim() : null;
-        Double endElevM = last != null ? last.rakim() : null;
+        Double startElevM = first != null ? (double) first.rakim() : null;
+        Double endElevM = last != null ? (double) last.rakim() : null;
 
         String typeStr = type.name().toLowerCase(Locale.ROOT);
         String label = type == RouteType.SHORTEST ? "En Kısa" : type == RouteType.BALANCED ? "Dengeli" : "En Kolay";

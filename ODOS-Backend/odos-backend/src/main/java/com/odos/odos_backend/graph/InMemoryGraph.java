@@ -58,14 +58,16 @@ public class InMemoryGraph {
         return adjacency.values().stream().mapToInt(List::size).sum();
     }
 
-    /** Düğüm: osmid, lon, lat, rakim (m) */
-    public record NodeRecord(long osmid, double lon, double lat, double rakim) {}
+    /** Düğüm: osmid, lon, lat, rakim (m). Bellek için float kullanılır. */
+    public record NodeRecord(long osmid, float lon, float lat, float rakim) {}
 
     /**
-     * Kenar: fid, komşu, maliyetler, uzunluk (m), u→v tırmanış/iniş (m),
-     * u→v yönünde ortalama işaretli eğim (rise/run) ve ortalama |eğim| (rise/run).
+     * Kenar: komşu, ileri yön maliyeti, uzunluk (m), u→v tırmanış/iniş (m),
+     * u→v yönünde ortalama işaretli eğim (rise/run).
+     *
+     * Not: Kullanılmayan alanlar (fid, reverse maliyet, mean abs eğim) atıldı.
+     * Sayısal değerlerde float ile bellek baskısı azaltıldı.
      */
-    public record EdgeRecord(long edgeId, long neighborId, double costForward, double costBackward, double lengthM,
-                             double ascentM, double descentM,
-                             double meanGradeSignedRatio, double meanAbsGradeRatio) {}
+    public record EdgeRecord(long neighborId, float costForward, float lengthM,
+                             float ascentM, float descentM, float meanGradeSignedRatio) {}
 }
