@@ -21,7 +21,11 @@ export function buildSaveRoutePayload(summary, extras = {}) {
     throw new Error('Özet verisi yok');
   }
   const completionRatio = Math.max(0, Math.min(1, Number(summary.completionRatio) || 0));
-  const poly = (summary.routeCoordinates || [])
+  const polySource =
+    Array.isArray(summary.fullWalkCoordinates) && summary.fullWalkCoordinates.length >= 2
+      ? summary.fullWalkCoordinates
+      : summary.routeCoordinates;
+  const poly = (polySource || [])
     .map((p) => {
       if (!p) return null;
       const lat = typeof p.latitude === 'number' ? p.latitude : p.lat;

@@ -1,4 +1,5 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import {
@@ -78,6 +79,7 @@ export function AuthProvider({ children }) {
   const [accessToken, setAccessToken] = useState(null);
   const [refreshToken, setRefreshToken] = useState(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const lastForegroundRefreshAtRef = useRef(0);
 
   const persistSession = useCallback(async (session) => {
     const nextUser = session?.user ?? null;
@@ -103,7 +105,12 @@ export function AuthProvider({ children }) {
     setUser(null);
     setAccessToken(null);
     setRefreshToken(null);
-    await AsyncStorage.multiRemove(Object.values(STORAGE_KEYS));
+    /** onboarding anahtarı kalsın: çıkış yapınca tanıtım tekrar gösterilmesin */
+    await AsyncStorage.multiRemove([
+      STORAGE_KEYS.accessToken,
+      STORAGE_KEYS.refreshToken,
+      STORAGE_KEYS.user,
+    ]);
   }, []);
 
   const refreshSession = useCallback(async (token) => {
@@ -156,6 +163,24 @@ export function AuthProvider({ children }) {
     restoreSession();
   }, [restoreSession]);
 
+  /** Uzun süre arka planda kalan oturumlarda access süresi dolunca POST'ların düşmesini azaltır */
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', async (next) => {
+      if (next !== 'active') return;
+      const now = Date.now();
+      if (now - lastForegroundRefreshAtRef.current < 90_000) return;
+      lastForegroundRefreshAtRef.current = now;
+      try {
+        const rt = await AsyncStorage.getItem(STORAGE_KEYS.refreshToken);
+        if (!rt) return;
+        await refreshSession(rt);
+      } catch {
+        /* sessiz */
+      }
+    });
+    return () => sub.remove();
+  }, [refreshSession]);
+
   const login = useCallback(async ({ identifier, password }) => {
     const data = await requestJson(getLoginUrl(), {
       method: 'POST',
@@ -207,9 +232,13 @@ export function AuthProvider({ children }) {
     });
 
     let response = await perform(token);
-    if (response.status === 401 && refreshToken) {
-      const session = await refreshSession(refreshToken);
-      response = await perform(session.accessToken);
+    if ((response.status === 401 || response.status === 403) && refreshToken) {
+      try {
+        const session = await refreshSession(refreshToken);
+        response = await perform(session.accessToken);
+      } catch {
+        /* sessiz */
+      }
     }
     return response;
   }, [accessToken, refreshSession, refreshToken]);
@@ -231,9 +260,13 @@ export function AuthProvider({ children }) {
     });
 
     let response = await perform(token);
-    if (response.status === 401 && refreshToken) {
-      const session = await refreshSession(refreshToken);
-      response = await perform(session.accessToken);
+    if ((response.status === 401 || response.status === 403) && refreshToken) {
+      try {
+        const session = await refreshSession(refreshToken);
+        response = await perform(session.accessToken);
+      } catch {
+        /* sessiz */
+      }
     }
     return response;
   }, [accessToken, refreshSession, refreshToken]);

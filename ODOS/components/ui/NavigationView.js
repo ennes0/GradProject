@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import {
   View,
   StyleSheet,
@@ -10,8 +10,10 @@ import {
   Platform,
   PanResponder,
   ScrollView,
+  ActivityIndicator,
 } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
+import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '../../constants/Colors';
@@ -42,6 +44,17 @@ const bearingDeg = (a, b) => {
     - Math.sin(toRad(a.latitude)) * Math.cos(toRad(b.latitude)) * Math.cos(toRad(b.longitude - a.longitude));
   return (toDeg(Math.atan2(y, x)) + 360) % 360;
 };
+const isValidLatLng = (lat, lng) =>
+  Number.isFinite(lat)
+  && Number.isFinite(lng)
+  && Math.abs(lat) <= 90
+  && Math.abs(lng) <= 180;
+/** Büyük dönüşleri ani yapmak yerine kısa yoldan süz */
+function smoothHeadingDeg(prev, next, blend = 0.28) {
+  let delta = ((next - prev + 540) % 360) - 180;
+  const x = prev + delta * blend;
+  return ((x % 360) + 360) % 360;
+}
 const normalizeTurnDelta = (d) => {
   let v = d;
   while (v > 180) v -= 360;
@@ -126,41 +139,61 @@ const chunkAvgAbsSlopePct = (chunk) => {
   return Number(v) || 0;
 };
 
-// User Location Marker with pulse animation
-const UserLocationMarker = () => {
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  
-  useEffect(() => {
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, {
-          toValue: 1.5,
-          duration: 1000,
-          useNativeDriver: true,
-        }),
-        Animated.timing(pulseAnim, {
-          toValue: 1,
-          duration: 1000,
-          useNativeDriver: true,
-        }),
-      ])
-    ).start();
-  }, []);
+/** Rota üzerindeki mesafe (m) ile önek koordinatları — geride kalan çizgi için */
+function extractPrefixAlongRoute(coords, cumulative, progressM) {
+  if (!coords?.length || progressM <= 0) return coords?.length ? [{ latitude: coords[0].latitude, longitude: coords[0].longitude }] : [];
+  const endLen = cumulative[cumulative.length - 1] ?? 0;
+  const target = Math.min(Math.max(0, progressM), endLen);
+  const out = [{ latitude: coords[0].latitude, longitude: coords[0].longitude }];
+  if (coords.length < 2) return out;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const base = cumulative[i] ?? 0;
+    const nextCum = cumulative[i + 1] ?? base;
+    const segLen = nextCum - base;
+    if (segLen <= 0) continue;
+    if (target <= nextCum + 1e-6) {
+      const t = Math.max(0, Math.min(1, (target - base) / segLen));
+      const a = coords[i];
+      const b = coords[i + 1];
+      out.push({
+        latitude: a.latitude + (b.latitude - a.latitude) * t,
+        longitude: a.longitude + (b.longitude - a.longitude) * t,
+      });
+      break;
+    }
+    const nextPt = coords[i + 1];
+    const last = out[out.length - 1];
+    if (Math.abs(last.latitude - nextPt.latitude) > 1e-9 || Math.abs(last.longitude - nextPt.longitude) > 1e-9) {
+      out.push({ latitude: nextPt.latitude, longitude: nextPt.longitude });
+    }
+  }
+  return out;
+}
 
-  return (
-    <View style={styles.userMarkerContainer}>
-      <Animated.View 
-        style={[
-          styles.userMarkerPulse,
-          { transform: [{ scale: pulseAnim }] }
-        ]} 
-      />
-      <View style={styles.userMarkerDot}>
-        <Ionicons name="navigate" size={14} color="#FFF" />
-      </View>
+function routeCoordsFingerprint(coords) {
+  if (!coords?.length) return '';
+  const a = coords[0];
+  const b = coords[coords.length - 1];
+  return `${coords.length}|${Number(a.latitude).toFixed(5)}|${Number(a.longitude).toFixed(5)}|${Number(b.latitude).toFixed(5)}|${Number(b.longitude).toFixed(5)}`;
+}
+
+/** Bu mesafeden yakınsan polyline’a “gerçekten rota üzerinde” sayılır; gri çizgi ve gidiş birikimi sadece böyle */
+const MAX_DIST_TO_COUNT_AS_ON_ROUTE_M = 30;
+
+/**
+ * Navigasyon haritasında özelleştirilmiş Marker + sürekli Animated.loop + tracksViewChanges=false
+ * birleşince konum güncellenince bile marker bazen ekranın köşesinde “takılı” kalıyor;
+ * parmak ekrandayken düzelmesi de haritanın yeniden çizim tetiklenmesiyle uyumlu.
+ * Bu yüzden pulse yok, düz görünüm; tracksViewChanges navigasyon boyunca true kalacak.
+ */
+const NavigationUserMarker = () => (
+  <View style={styles.userMarkerContainer} collapsable={false}>
+    <View style={[styles.userMarkerPulse, styles.userMarkerPulseStatic]} />
+    <View style={styles.userMarkerDot}>
+      <Ionicons name="navigate" size={14} color="#FFF" />
     </View>
-  );
-};
+  </View>
+);
 
 // Destination Marker
 const DestinationMarker = () => (
@@ -213,9 +246,28 @@ export default function NavigationView({
   const [maxOffRouteDistanceM, setMaxOffRouteDistanceM] = useState(0);
   const [rerouteCount, setRerouteCount] = useState(0);
   const [sessionStartAt, setSessionStartAt] = useState(null);
+  const [priorWalkedGeometryM, setPriorWalkedGeometryM] = useState(0);
+  const [priorRouteLengthSumM, setPriorRouteLengthSumM] = useState(0);
+  const [traveledOverlaySegments, setTraveledOverlaySegments] = useState([]);
+  /** Projeksiyon effect’inin son yazdığı bacak — reroute anında layout effect bunu okur (polyline mesafesi dahil) */
+  const liveRouteLegRef = useRef({
+    fp: '',
+    progressM: 0,
+    projDistM: Number.POSITIVE_INFINITY,
+    coords: [],
+    cumulative: [0],
+    totalM: 0,
+  });
+  const routeFingerprintPrevRef = useRef('');
+  /** Rota üzerinde gerçekten kat edilen mesafe (polyline’a yakınken artar); reroute’ta gri çizgi bununla kesilir */
+  const [latchedProgressAlongLegM, setLatchedProgressAlongLegM] = useState(0);
+  const latchedProgressAlongLegRef = useRef(0);
   const offRouteHitsRef = useRef(0);
   const lastRerouteAtRef = useRef(0);
   const speedSmoothingRef = useRef([]);
+  /** Son pusula okumasının zamanı — GPS ile başlık çekişmesini önlemek için */
+  const lastCompassAtRef = useRef(0);
+  const lastRouteBearingApplyRef = useRef(0);
   
   const routeCoords = useMemo(() => {
     if (Array.isArray(route?.shapePoints) && route.shapePoints.length > 1) {
@@ -228,6 +280,15 @@ export default function NavigationView({
       ? route.coordinates.filter((p) => Number.isFinite(p?.latitude) && Number.isFinite(p?.longitude))
       : [];
   }, [route?.shapePoints, route?.coordinates]);
+
+  const safeUserCoordinate = useMemo(() => {
+    if (!userLocation) return null;
+    const lat = Number(userLocation.latitude);
+    const lng = Number(userLocation.longitude);
+    if (!isValidLatLng(lat, lng)) return null;
+    return { latitude: lat, longitude: lng };
+  }, [userLocation?.latitude, userLocation?.longitude]);
+
   const routeAnalysis = useMemo(() => {
     if (routeCoords.length < 2) {
       return { cumulative: [0], totalM: 0, instructions: [{ action: 'straight', atM: 0 }] };
@@ -267,7 +328,38 @@ export default function NavigationView({
     instructions.push({ action: 'arrive', atM: cumulative[cumulative.length - 1] });
     return { cumulative, totalM: cumulative[cumulative.length - 1], instructions };
   }, [routeCoords]);
-  const progressRatio = routeAnalysis.totalM > 0 ? Math.max(0, Math.min(1, currentProgressM / routeAnalysis.totalM)) : 0;
+
+  useLayoutEffect(() => {
+    const fp = routeCoordsFingerprint(routeCoords);
+    if (!visible) {
+      routeFingerprintPrevRef.current = '';
+      return;
+    }
+    const prevFp = routeFingerprintPrevRef.current;
+    if (prevFp && fp && prevFp !== fp) {
+      const leg = liveRouteLegRef.current;
+      if (leg.fp === prevFp && leg.coords.length > 1) {
+        setPriorRouteLengthSumM((p) => p + leg.totalM);
+        const walkedOnLegM = latchedProgressAlongLegRef.current;
+        if (walkedOnLegM > 1) {
+          setPriorWalkedGeometryM((p) => p + walkedOnLegM);
+          const prefix = extractPrefixAlongRoute(leg.coords, leg.cumulative, walkedOnLegM);
+          if (prefix.length > 1) {
+            setTraveledOverlaySegments((segs) => [...segs, prefix]);
+          }
+        }
+        latchedProgressAlongLegRef.current = 0;
+        setLatchedProgressAlongLegM(0);
+      }
+    }
+    routeFingerprintPrevRef.current = fp;
+  }, [routeCoords, visible]);
+
+  const effectiveWalkedGeometryM = priorWalkedGeometryM + latchedProgressAlongLegM;
+  const plannedRouteTotalM = Math.max(0, priorRouteLengthSumM + routeAnalysis.totalM);
+  const progressRatio = plannedRouteTotalM > 0
+    ? Math.max(0, Math.min(1, effectiveWalkedGeometryM / plannedRouteTotalM))
+    : (routeAnalysis.totalM > 0 ? Math.max(0, Math.min(1, latchedProgressAlongLegM / routeAnalysis.totalM)) : 0);
   const nextInstruction = useMemo(() => {
     const upcoming = routeAnalysis.instructions.find((x) => x.atM > currentProgressM + 3);
     return upcoming || routeAnalysis.instructions[routeAnalysis.instructions.length - 1] || { action: 'arrive', atM: 0 };
@@ -305,7 +397,8 @@ export default function NavigationView({
     return null;
   }, [userLocation?.speed]);
   const effectiveSpeedMps = Math.max(0.7, smoothedUserSpeedMps || plannedAvgMps || 1.25);
-  const etaMin = Math.max(0, ((routeAnalysis.totalM - currentProgressM) / effectiveSpeedMps) / 60);
+  const remainingPlanM = Math.max(0, plannedRouteTotalM - effectiveWalkedGeometryM);
+  const etaMin = Math.max(0, (remainingPlanM / effectiveSpeedMps) / 60);
   const navigationData = {
     totalDistance: route?.distance || fmtDistance(routeAnalysis.totalM),
     totalClimb: route?.totalClimb || '0m',
@@ -358,6 +451,38 @@ export default function NavigationView({
     return PANEL_HIDE_OFFSET;
   }, [panelHeight]);
 
+  /** Konum güncellemesi ile pusula aynı state'e yazılmasın: pusula sadece burada (Navigate Modal içinde). */
+  useEffect(() => {
+    if (!visible) return;
+    lastCompassAtRef.current = Date.now();
+    let sub = null;
+    const run = async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') return;
+        sub = await Location.watchHeadingAsync((hd) => {
+          const trueH = hd?.trueHeading;
+          const magH = hd?.magHeading;
+          const raw =
+            trueH >= 0 && Number.isFinite(trueH)
+              ? trueH
+              : magH >= 0 && Number.isFinite(magH)
+                ? magH
+                : null;
+          if (raw == null) return;
+          lastCompassAtRef.current = Date.now();
+          setHeading((prev) => smoothHeadingDeg(prev, raw, Platform.OS === 'ios' ? 0.36 : 0.42));
+        });
+      } catch (e) {
+        console.warn('[NavigationView] watchHeadingAsync:', e?.message || e);
+      }
+    };
+    run();
+    return () => {
+      if (sub && typeof sub.remove === 'function') sub.remove();
+    };
+  }, [visible]);
+
   useEffect(() => {
     if (visible) {
       Animated.timing(progressAnim, { toValue: progressRatio, duration: 200, useNativeDriver: false }).start();
@@ -377,6 +502,22 @@ export default function NavigationView({
       setSessionStartAt(new Date().toISOString());
       setMaxOffRouteDistanceM(0);
       setRerouteCount(0);
+      setPriorWalkedGeometryM(0);
+      setPriorRouteLengthSumM(0);
+      setTraveledOverlaySegments([]);
+      latchedProgressAlongLegRef.current = 0;
+      setLatchedProgressAlongLegM(0);
+      liveRouteLegRef.current = {
+        fp: '',
+        progressM: 0,
+        projDistM: Number.POSITIVE_INFINITY,
+        coords: [],
+        cumulative: [0],
+        totalM: 0,
+      };
+      routeFingerprintPrevRef.current = '';
+      lastCompassAtRef.current = Date.now();
+      setHeading(0);
       return;
     }
     setIsMapReady(false);
@@ -443,13 +584,11 @@ export default function NavigationView({
 
   const buildSessionSummary = useCallback(() => {
     const distanceKmFromRoute = parseDistanceKm(route?.distance);
-    const plannedDistanceM = Math.max(
-      routeAnalysis.totalM || 0,
-      distanceKmFromRoute != null ? distanceKmFromRoute * 1000 : 0,
-    );
-    const traveledDistanceM = Math.max(0, currentProgressM);
+    const apiPlannedM = distanceKmFromRoute != null ? distanceKmFromRoute * 1000 : 0;
+    const plannedDistanceM = Math.max(plannedRouteTotalM, apiPlannedM, routeAnalysis.totalM || 0);
+    const traveledDistanceM = Math.max(0, effectiveWalkedGeometryM);
     const boundedTraveledM = plannedDistanceM > 0
-      ? Math.min(traveledDistanceM, plannedDistanceM)
+      ? Math.min(traveledDistanceM, plannedDistanceM * 1.15)
       : traveledDistanceM;
     const completionRatio = plannedDistanceM > 0
       ? Math.max(0, Math.min(1, boundedTraveledM / plannedDistanceM))
@@ -473,6 +612,28 @@ export default function NavigationView({
     const climbM = Math.max(0, Math.round(plannedClimbM * completionRatio));
 
     const coords = Array.isArray(route?.coordinates) ? route.coordinates : [];
+    const currentPrefix = extractPrefixAlongRoute(routeCoords, routeAnalysis.cumulative, latchedProgressAlongLegM);
+    const fullWalkCoordinates = (() => {
+      const merged = [];
+      for (const seg of traveledOverlaySegments) {
+        for (const p of seg) merged.push({ latitude: p.latitude, longitude: p.longitude });
+      }
+      for (const p of currentPrefix) merged.push({ latitude: p.latitude, longitude: p.longitude });
+      const deduped = [];
+      const eps = 1e-6;
+      for (const p of merged) {
+        const prev = deduped[deduped.length - 1];
+        if (!prev || Math.abs(prev.latitude - p.latitude) > eps || Math.abs(prev.longitude - p.longitude) > eps) {
+          deduped.push(p);
+        }
+      }
+      return deduped;
+    })();
+
+    const elevN = elevationSeries.length;
+    const elevTake = elevN >= 2 ? Math.max(2, Math.ceil(elevN * completionRatio)) : elevN;
+    const traveledElevationSeries = elevN >= 2 ? elevationSeries.slice(0, elevTake) : elevationSeries;
+
     return {
       routeTitle: route?.label || tx('Yürüyüş rotası', 'Walking route'),
       routeType: route?.type || 'balanced',
@@ -503,13 +664,18 @@ export default function NavigationView({
       }).filter((p) => p && Number.isFinite(p.latitude) && Number.isFinite(p.longitude)),
       maxSlopePct: route?.maxSlopePct != null && Number.isFinite(route.maxSlopePct) ? route.maxSlopePct : null,
       avgSlopePct: route?.avgSlopePct != null && Number.isFinite(route.avgSlopePct) ? route.avgSlopePct : null,
-      elevationSeries,
+      elevationSeries: traveledElevationSeries.length >= 2 ? traveledElevationSeries : elevationSeries,
+      fullWalkCoordinates: fullWalkCoordinates.length >= 2 ? fullWalkCoordinates : null,
       instruction: currentInstruction,
     };
   }, [
     route,
     routeAnalysis.totalM,
-    currentProgressM,
+    routeAnalysis.cumulative,
+    routeCoords,
+    latchedProgressAlongLegM,
+    effectiveWalkedGeometryM,
+    plannedRouteTotalM,
     elapsedTime,
     rerouteCount,
     maxOffRouteDistanceM,
@@ -520,6 +686,7 @@ export default function NavigationView({
     endLabel,
     elevationSeries,
     currentInstruction,
+    traveledOverlaySegments,
   ]);
 
   const resetSessionState = () => {
@@ -536,9 +703,34 @@ export default function NavigationView({
     setMaxOffRouteDistanceM(0);
     setRerouteCount(0);
     setSessionStartAt(null);
+    setPriorWalkedGeometryM(0);
+    setPriorRouteLengthSumM(0);
+    setTraveledOverlaySegments([]);
+    latchedProgressAlongLegRef.current = 0;
+    setLatchedProgressAlongLegM(0);
+    liveRouteLegRef.current = {
+      fp: '',
+      progressM: 0,
+      projDistM: Number.POSITIVE_INFINITY,
+      coords: [],
+      cumulative: [0],
+      totalM: 0,
+    };
+    routeFingerprintPrevRef.current = '';
     offRouteHitsRef.current = 0;
     lastRerouteAtRef.current = 0;
+    lastCompassAtRef.current = 0;
+    lastRouteBearingApplyRef.current = 0;
+    setHeading(0);
   };
+
+  const currentTraveledPrefixCoords = useMemo(
+    () => {
+      if (routeCoords.length < 2 || latchedProgressAlongLegM <= 0) return [];
+      return extractPrefixAlongRoute(routeCoords, routeAnalysis.cumulative, latchedProgressAlongLegM);
+    },
+    [routeCoords, routeAnalysis.cumulative, latchedProgressAlongLegM],
+  );
 
   const handleDismissNavigation = () => {
     resetSessionState();
@@ -639,7 +831,7 @@ export default function NavigationView({
 
   useEffect(() => {
     if (!visible || !isMapReady || !mapRef.current || initialFitDoneRef.current) return;
-    const hasUser = !!(userLocation && Number.isFinite(userLocation.latitude) && Number.isFinite(userLocation.longitude));
+    const hasUser = !!safeUserCoordinate;
     const hasRoute = routeCoords.length > 1;
     const hasStart = !!(startPoint && Number.isFinite(startPoint.latitude) && Number.isFinite(startPoint.longitude));
     if (!hasUser && !hasRoute && !hasStart) return;
@@ -652,10 +844,10 @@ export default function NavigationView({
     fitTimeoutRef.current = setTimeout(() => {
       if (!mapRef.current || initialFitDoneRef.current) return;
 
-      if (hasUser) {
+      if (hasUser && safeUserCoordinate) {
         // En başta rotanın tamamını göstermek yerine sadece kullanıcıya yakın (3D, zoom: 19.5, pitch: 60) şekilde göster.
         mapRef.current.animateCamera({
-          center: { latitude: userLocation.latitude, longitude: userLocation.longitude },
+          center: { latitude: safeUserCoordinate.latitude, longitude: safeUserCoordinate.longitude },
           pitch: 60,
           heading: heading || 0,
           zoom: 19.5,
@@ -685,19 +877,19 @@ export default function NavigationView({
     visible,
     isMapReady,
     routeCoords,
-    userLocation,
+    safeUserCoordinate,
     endPoint,
     startPoint,
   ]);
 
   useEffect(() => {
-    if (!visible || !userLocation || routeCoords.length < 2 || isPaused) return;
+    if (!visible || !safeUserCoordinate || routeCoords.length < 2 || isPaused) return;
     let bestDist = Number.POSITIVE_INFINITY;
     let bestProgress = 0;
     for (let i = 0; i < routeCoords.length - 1; i++) {
       const a = routeCoords[i];
       const b = routeCoords[i + 1];
-      const proj = projectPointToSegment(userLocation, a, b);
+      const proj = projectPointToSegment(safeUserCoordinate, a, b);
       if (proj.distanceM < bestDist) {
         bestDist = proj.distanceM;
         const segLen = haversineMeters(a, b);
@@ -705,25 +897,38 @@ export default function NavigationView({
         bestProgress = base + segLen * proj.t;
       }
     }
+    liveRouteLegRef.current = {
+      fp: routeCoordsFingerprint(routeCoords),
+      progressM: bestProgress,
+      projDistM: bestDist,
+      coords: routeCoords,
+      cumulative: routeAnalysis.cumulative,
+      totalM: routeAnalysis.totalM,
+    };
+    if (bestDist <= MAX_DIST_TO_COUNT_AS_ON_ROUTE_M) {
+      const next = Math.max(latchedProgressAlongLegRef.current, bestProgress);
+      latchedProgressAlongLegRef.current = next;
+      setLatchedProgressAlongLegM(next);
+    }
     setCurrentProgressM(bestProgress);
     setOffRouteDistanceM(bestDist);
     setMaxOffRouteDistanceM((prev) => Math.max(prev, bestDist));
-    const offRouteThresholdM = 35;
-    const recoverThresholdM = 22;
+    const offRouteThresholdM = 40;
+    const recoverThresholdM = 26;
     if (bestDist > offRouteThresholdM) {
       offRouteHitsRef.current += 1;
     } else if (bestDist < recoverThresholdM) {
       offRouteHitsRef.current = 0;
       setIsOffRoute(false);
     }
-    if (offRouteHitsRef.current >= 3) {
+    if (offRouteHitsRef.current >= 2) {
       setIsOffRoute(true);
       const now = Date.now();
-      const cooldownMs = 15000;
+      const cooldownMs = 8000;
       if (!isRerouting && onRerouteRequest && (now - lastRerouteAtRef.current > cooldownMs)) {
         setIsRerouting(true);
         lastRerouteAtRef.current = now;
-        Promise.resolve(onRerouteRequest({ latitude: userLocation.latitude, longitude: userLocation.longitude }))
+        Promise.resolve(onRerouteRequest({ latitude: safeUserCoordinate.latitude, longitude: safeUserCoordinate.longitude }))
           .then((rerouteApplied) => {
             if (rerouteApplied) {
               setRerouteCount((prev) => prev + 1);
@@ -735,25 +940,35 @@ export default function NavigationView({
           });
       }
     }
-    if (userLocation.heading != null && Number.isFinite(userLocation.heading)) {
-      setHeading(userLocation.heading);
-    } else {
-      const remaining = routeAnalysis.cumulative[routeAnalysis.cumulative.length - 1] - bestProgress;
-      if (remaining > 5) {
-        const next = routeCoords.find((_, idx) => (routeAnalysis.cumulative[idx] || 0) >= bestProgress);
-        if (next) {
-          const here = { latitude: userLocation.latitude, longitude: userLocation.longitude };
-          setHeading(bearingDeg(here, next));
-        }
+  }, [visible, safeUserCoordinate, routeCoords, routeAnalysis.cumulative, isPaused, isRerouting, onRerouteRequest]);
+
+  /** Pusula sessiz kaldığında rota bearing ile ok yönü */
+  useEffect(() => {
+    if (!visible || !safeUserCoordinate || routeCoords.length < 2 || isPaused) return;
+    const staleMs = Date.now() - lastCompassAtRef.current;
+    if (staleMs < 1800) return;
+    const now = Date.now();
+    if (now - lastRouteBearingApplyRef.current < 400) return;
+    lastRouteBearingApplyRef.current = now;
+    const remaining = routeAnalysis.totalM - currentProgressM;
+    if (remaining < 6) return;
+    let targetPt = routeCoords[routeCoords.length - 1];
+    for (let i = 0; i < routeCoords.length - 1; i++) {
+      const nextCum = routeAnalysis.cumulative[i + 1] || 0;
+      if (currentProgressM <= nextCum + 1e-3) {
+        targetPt = routeCoords[i + 1];
+        break;
       }
     }
-  }, [visible, userLocation, routeCoords, routeAnalysis.cumulative, isPaused, isRerouting, onRerouteRequest]);
+    const brg = bearingDeg(safeUserCoordinate, targetPt);
+    setHeading((prev) => smoothHeadingDeg(prev, brg, 0.16));
+  }, [visible, safeUserCoordinate, routeCoords, routeAnalysis.totalM, routeAnalysis.cumulative, currentProgressM, isPaused]);
 
   // Center map on user location
   const centerOnUser = () => {
-    if (mapRef.current && userLocation) {
+    if (mapRef.current && safeUserCoordinate) {
       mapRef.current.animateCamera({
-        center: userLocation,
+        center: safeUserCoordinate,
         pitch: is3DMode ? 60 : 0,
         heading: heading,
         zoom: is3DMode ? 19.5 : 17,
@@ -766,9 +981,9 @@ export default function NavigationView({
   const toggle3DMode = () => {
     const newMode = !is3DMode;
     setIs3DMode(newMode);
-    if (mapRef.current && userLocation) {
+    if (mapRef.current && safeUserCoordinate) {
       mapRef.current.animateCamera({
-        center: userLocation,
+        center: safeUserCoordinate,
         pitch: newMode ? 60 : 0,
         heading: heading,
         zoom: newMode ? 19.5 : 17,
@@ -779,10 +994,10 @@ export default function NavigationView({
 
   // Get map region from route
   const getMapRegion = () => {
-    if (userLocation) {
+    if (safeUserCoordinate) {
       return {
-        latitude: userLocation.latitude,
-        longitude: userLocation.longitude,
+        latitude: safeUserCoordinate.latitude,
+        longitude: safeUserCoordinate.longitude,
         latitudeDelta: 0.005,
         longitudeDelta: 0.005,
       };
@@ -828,23 +1043,17 @@ export default function NavigationView({
           rotateEnabled={true}
           scrollEnabled={true}
           zoomEnabled={true}
-          initialCamera={{
-            center: getMapRegion(),
-            pitch: is3DMode ? 60 : 0,
-            heading: heading,
-            zoom: 18,
-            altitude: 1000,
-          }}
         >
           {/* User Location Marker */}
-          {userLocation && (
+          {safeUserCoordinate && (
             <Marker
-              coordinate={userLocation}
+              coordinate={safeUserCoordinate}
               anchor={{ x: 0.5, y: 0.5 }}
-              flat={true}
+              flat
+              tracksViewChanges
               rotation={heading}
             >
-              <UserLocationMarker />
+              <NavigationUserMarker />
             </Marker>
           )}
 
@@ -905,9 +1114,58 @@ export default function NavigationView({
                   />
                 </>
               )}
+              {/* Önceki bacaklar + mevcut bacakta gidilen: gri şeffaf overlay */}
+              {traveledOverlaySegments.map((seg, si) => (
+                seg.length > 1 ? (
+                  <React.Fragment key={`trav-${si}`}>
+                    <Polyline
+                      coordinates={seg}
+                      strokeColor="rgba(250,250,252,0.85)"
+                      strokeWidth={12}
+                      lineCap="round"
+                      lineJoin="round"
+                    />
+                    <Polyline
+                      coordinates={seg}
+                      strokeColor="rgba(120,125,135,0.42)"
+                      strokeWidth={8}
+                      lineCap="round"
+                      lineJoin="round"
+                    />
+                  </React.Fragment>
+                ) : null
+              ))}
+              {currentTraveledPrefixCoords.length > 1 && (
+                <>
+                  <Polyline
+                    coordinates={currentTraveledPrefixCoords}
+                    strokeColor="rgba(250,250,252,0.85)"
+                    strokeWidth={12}
+                    lineCap="round"
+                    lineJoin="round"
+                  />
+                  <Polyline
+                    coordinates={currentTraveledPrefixCoords}
+                    strokeColor="rgba(120,125,135,0.42)"
+                    strokeWidth={8}
+                    lineCap="round"
+                    lineJoin="round"
+                  />
+                </>
+              )}
             </>
           )}
         </MapView>
+
+        {isRerouting && (
+          <View style={styles.rerouteOverlay} pointerEvents="auto">
+            <ActivityIndicator size="large" color={Colors.primary} />
+            <Text style={styles.rerouteOverlayTitle}>{tx('Rotadan ciktiniz', 'Off route')}</Text>
+            <Text style={styles.rerouteOverlaySub}>
+              {tx('Yeni rota hesaplaniyor…', 'Calculating a new route…')}
+            </Text>
+          </View>
+        )}
 
         {/* Map Controls Overlay */}
         <View style={styles.mapControlsContainer}>
@@ -1225,13 +1483,37 @@ const styles = StyleSheet.create({
   fullMap: {
     height: SCREEN_HEIGHT,
   },
-  
+  rerouteOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(15,23,42,0.72)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 32,
+  },
+  rerouteOverlayTitle: {
+    marginTop: 16,
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#F8FAFC',
+    textAlign: 'center',
+  },
+  rerouteOverlaySub: {
+    marginTop: 8,
+    fontSize: 14,
+    color: 'rgba(248,250,252,0.85)',
+    textAlign: 'center',
+  },
+
   // User Location Marker
   userMarkerContainer: {
     alignItems: 'center',
     justifyContent: 'center',
     width: 50,
     height: 50,
+  },
+  userMarkerPulseStatic: {
+    opacity: 0.38,
+    transform: [{ scale: 1.35 }],
   },
   userMarkerPulse: {
     position: 'absolute',

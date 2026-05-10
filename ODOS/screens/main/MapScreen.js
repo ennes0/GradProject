@@ -39,6 +39,18 @@ import Svg, { Path, Circle, Ellipse } from 'react-native-svg';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
+const toRad = (v) => (v * Math.PI) / 180;
+const haversineMetersMap = (a, b) => {
+  if (!a || !b) return 0;
+  const R = 6371000;
+  const dLat = toRad(b.latitude - a.latitude);
+  const dLon = toRad(b.longitude - a.longitude);
+  const la1 = toRad(a.latitude);
+  const la2 = toRad(b.latitude);
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+};
+
 /** API blok ortalaması |eğim| (%) — yeşil → sarı → turuncu → kırmızı (ara değerler RGB lerp) */
 function slopeAvgAbsPctToColor(pct) {
   const p = Math.max(0, Number(pct) || 0);
@@ -289,6 +301,8 @@ export default function MapScreen({ route }) {
   const reverseGeocodeCacheRef = useRef(new Map());
   const consumedPlannerPrefillRef = useRef(null);
   const consumedReplaySessionRef = useRef(null);
+  const navLocationSmoothRef = useRef(null);
+  const rerouteInFlightRef = useRef(false);
   
   // Mock lokasyon verileri - İstanbul
   const mockLocations = [
@@ -337,6 +351,12 @@ export default function MapScreen({ route }) {
   }, [initialLocation]);
 
   useEffect(() => {
+    if (!isNavigating) {
+      navLocationSmoothRef.current = null;
+    }
+  }, [isNavigating]);
+
+  useEffect(() => {
     let sub = null;
     const startWatch = async () => {
       if (!isNavigating) return;
@@ -345,18 +365,45 @@ export default function MapScreen({ route }) {
       sub = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.BestForNavigation,
-          timeInterval: 2000,
-          distanceInterval: 3,
+          timeInterval: 1000,
+          distanceInterval: 5,
         },
         (pos) => {
           const c = pos?.coords;
           if (!c) return;
-          setLocation({
+          if (c.accuracy != null && Number.isFinite(c.accuracy) && c.accuracy > 130) {
+            return;
+          }
+          const raw = {
             latitude: c.latitude,
             longitude: c.longitude,
             speed: c.speed,
-            heading: c.heading,
-          });
+            heading: c.heading >= 0 && Number.isFinite(c.heading) ? c.heading : undefined,
+          };
+          const prev = navLocationSmoothRef.current;
+          if (!prev) {
+            navLocationSmoothRef.current = raw;
+            setLocation(raw);
+            return;
+          }
+          const d = haversineMetersMap(prev, raw);
+          if (d > 130) {
+            navLocationSmoothRef.current = raw;
+            setLocation({
+              ...raw,
+              heading: raw.heading ?? prev.heading,
+            });
+            return;
+          }
+          const alpha = d > 35 ? 0.42 : d > 10 ? 0.26 : 0.14;
+          const blended = {
+            latitude: prev.latitude * (1 - alpha) + raw.latitude * alpha,
+            longitude: prev.longitude * (1 - alpha) + raw.longitude * alpha,
+            speed: raw.speed,
+            heading: raw.heading ?? prev.heading,
+          };
+          navLocationSmoothRef.current = blended;
+          setLocation(blended);
         }
       );
     };
@@ -1162,7 +1209,10 @@ export default function MapScreen({ route }) {
   };
 
   const handleRerouteRequest = async (currentCoord) => {
-    if (!currentCoord || !endPoint || isLoadingRoute) return false;
+    if (!currentCoord || !endPoint) return false;
+    if (rerouteInFlightRef.current || isLoadingRoute) return false;
+    rerouteInFlightRef.current = true;
+    setIsLoadingRoute(true);
     try {
       const url = getRoutesUrl(currentCoord.latitude, currentCoord.longitude, endPoint.latitude, endPoint.longitude);
       const response = await fetch(url);
@@ -1187,6 +1237,9 @@ export default function MapScreen({ route }) {
     } catch (e) {
       console.warn('[ODOS API] Reroute failed:', e?.message || e);
       return false;
+    } finally {
+      rerouteInFlightRef.current = false;
+      setIsLoadingRoute(false);
     }
   };
 

@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { useAuth } from '../context/AuthContext';
 import BottomTabNavigator from './BottomTabNavigator';
@@ -16,6 +17,9 @@ import { useLanguage } from '../context/LanguageContext';
 import OnboardingScreen from '../../screens/onboarding/OnboardingScreen';
 
 const Stack = createNativeStackNavigator();
+
+/** AuthContext ile aynı anahtar — tamamlanan onboarding cihazda kalır */
+const ONBOARDING_STORAGE_KEY = 'odos.auth.onboardingCompleted';
 
 const linking = {
   prefixes: ['odos://', 'https://odos.app'],
@@ -34,17 +38,28 @@ const AppNavigator = () => {
   const { isAuthLoading, isAuthenticated, user } = useAuth();
   const { isLanguageReady } = useLanguage();
   const [showOnboarding, setShowOnboarding] = React.useState(null);
+  const [localOnboardingDone, setLocalOnboardingDone] = React.useState(null);
   const navigationKeyRef = React.useRef(0);
 
   React.useEffect(() => {
-    if (isAuthenticated && user && !isAuthLoading) {
-      const shouldShowOnboarding = !user?.onboarding_completed;
-      console.log('[Onboarding] user.onboarding_completed:', user?.onboarding_completed, 'showOnboarding:', shouldShowOnboarding);
-      setShowOnboarding(shouldShowOnboarding);
-    } else {
+    let cancelled = false;
+    AsyncStorage.getItem(ONBOARDING_STORAGE_KEY).then((v) => {
+      if (!cancelled) setLocalOnboardingDone(v === 'true');
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (isAuthenticated && user && !isAuthLoading && localOnboardingDone !== null) {
+      const serverDone = user?.onboarding_completed === true;
+      const done = serverDone || localOnboardingDone === true;
+      setShowOnboarding(!done);
+    } else if (!isAuthenticated || !user) {
       setShowOnboarding(null);
     }
-  }, [isAuthenticated, user?.onboarding_completed, isAuthLoading]);
+  }, [isAuthenticated, user, user?.onboarding_completed, isAuthLoading, localOnboardingDone]);
 
   const handleOnboardingComplete = React.useCallback(() => {
     console.log('[AppNavigator] Onboarding completion triggered, setting showOnboarding to false');
@@ -52,6 +67,10 @@ const AppNavigator = () => {
   }, []);
 
   if (isAuthLoading || !isLanguageReady) {
+    return null;
+  }
+
+  if (isAuthenticated && user && localOnboardingDone === null) {
     return null;
   }
 
